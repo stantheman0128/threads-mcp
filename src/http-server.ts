@@ -11,6 +11,11 @@ import {remoteHealth} from './remote-health.js';
 import {validateDirectProfileCommand} from './direct-profile-command.js';
 import {RemoteSocialController} from './remote-social.js';
 import {RemoteMediaController} from './remote-media.js';
+import {RemoteWorkflowController} from './remote-workflows.js';
+import {RemoteBrowserController} from './remote-browser.js';
+import {RemoteReadController} from './remote-reads.js';
+import {RemoteOfficialApiController} from './remote-api.js';
+import {remoteCapabilities,type RemoteCapabilities} from './remote-capabilities.js';
 
 const MAX_BODY=64*1024;
 const validToken=(value:string)=>/^[A-Za-z0-9_-]{43,128}$/.test(value);
@@ -38,14 +43,18 @@ export function changeRemoteToken(dataDir:string,action:'rotate'|'revoke'){
 
 /** Only approved read commands can reach the browser; never index a private/current arbitrary route. */
 export class RemoteReadDriver implements BrowserDriver{
+  private accessGuard?:()=>void;
   constructor(private readonly driver:BrowserDriver){}
+  setAccessGuard(guard:()=>void){this.accessGuard=guard;}
   status(){return this.driver.status();}
   async refreshStatus(){return this.driver.refreshStatus?this.driver.refreshStatus():this.driver.status();}
   async command<T>(command:Record<string,unknown>):Promise<T>{
     if(!['read','navigate','scroll','open_read_panel','direct_profile'].includes(String(command.type)))throw new ThreadsError('REMOTE_READ_ONLY','Unsupported remote browser operation.');
     if(command.type==='direct_profile')validateDirectProfileCommand(command);
     if(command.type==='navigate'&&!safeReadUrl(command.url))throw new ThreadsError('REMOTE_ROUTE_DENIED','Unsupported remote read route.');
-    const result=await this.driver.command<any>(command);
+    this.accessGuard?.();
+    const result=await this.driver.command<any>(command,this.accessGuard);
+    this.accessGuard?.();
     if(command.type==='read'){
       if(!safeReadUrl(result.url))throw new ThreadsError('REMOTE_ROUTE_DENIED','The selected tab is outside the remote read scope.');
       // Structured tools do not need page-wide text or private notification/composer metadata.
@@ -58,15 +67,18 @@ export class RemoteReadDriver implements BrowserDriver{
 function safeReadUrl(value:unknown):boolean{
   if(typeof value!=='string')return false;
   try{const u=new URL(value);return u.protocol==='https:'&&!u.username&&!u.password&&(!u.port||u.port==='443')&&['threads.com','www.threads.com','threads.net','www.threads.net'].includes(u.hostname)&&
-    /^(?:\/|\/(?:search|liked|saved)\/?|\/@[\w.]+(?:\/(?:replies|media|reposts))?\/?|\/(?:@[\w.]+\/)?post\/[\w-]+\/?)$/.test(u.pathname);
+    /^(?:\/|\/(?:search|liked|saved|following)\/?|\/@[\w.]+(?:\/(?:replies|media|reposts))?\/?|\/(?:@[\w.]+\/)?post\/[\w-]+\/?)$/.test(u.pathname);
   }catch{return false;}
 }
 
-export async function startRemoteHttp(service:ThreadsService,options:{port:number;readToken:()=>string;controlledWrites?:boolean;controlledMedia?:boolean;socialDriver?:BrowserDriver}){
+export async function startRemoteHttp(service:ThreadsService,options:{port:number;readToken:()=>string;controlledWrites?:boolean;controlledMedia?:boolean;socialDriver?:BrowserDriver;capabilities?:Partial<RemoteCapabilities>}){
   if(!Number.isInteger(options.port)||options.port<0||options.port>65535)throw new Error('Invalid remote HTTP port.');
   if(service.config.writesEnabled!==!!options.controlledWrites)throw new Error('Remote HTTP writes require explicit matching controlled mode.');
   if(options.controlledMedia&&!options.controlledWrites)throw new Error('Remote media requires explicitly enabled remote writes.');
   if(options.controlledWrites&&!options.socialDriver)throw new Error('Controlled mode requires a local context driver.');
+  const capabilities=remoteCapabilities(options.capabilities);
+  if((capabilities.delete||capabilities.schedule||capabilities.browserFallback||capabilities.officialApi)&&!options.controlledWrites)throw new Error('Delete, schedule, browser fallback and official API require explicit remote writes.');
+  if(Object.values(capabilities).some(Boolean)&&!options.socialDriver)throw new Error('Extended remote capabilities require a context driver.');
   let credentialEpoch:string|undefined;
   let requestCredential:string|undefined;
   // Check again at controller dispatch boundaries, not only HTTP request arrival.
@@ -77,9 +89,22 @@ export async function startRemoteHttp(service:ThreadsService,options:{port:numbe
       throw new ThreadsError('ACCESS_CHANGED','Remote credentials changed; preparation is invalid.');
     }
   };
-  const media=options.controlledMedia?new RemoteMediaController(service,options.socialDriver!,assertAccess):undefined;
-  const social=options.controlledWrites?new RemoteSocialController(service,options.socialDriver!,assertAccess,media?(request,account)=>media.authorize(request,account):undefined):undefined;
-  function invalidate(){social?.invalidatePrepared();media?.invalidate();}
+  if(service.driver instanceof RemoteReadDriver)service.driver.setAccessGuard(assertAccess);
+  // RemoteExtensionDriver rechecks this guard after its awaited pairing/status preflight,
+  // immediately before POST /command. A wrapper check alone would leave a revocation gap.
+  const contextDriver:BrowserDriver|undefined=options.socialDriver?{
+    status:()=>options.socialDriver!.status(),close:async()=>{},
+    command:<T>(command:Record<string,unknown>,dispatchGuard?:()=>void)=>{
+      const guard=()=>{assertAccess();dispatchGuard?.();};guard();return options.socialDriver!.command<T>(command,guard);
+    }
+  }:undefined;
+  const media=options.controlledMedia?new RemoteMediaController(service,contextDriver!,assertAccess):undefined;
+  const social=options.controlledWrites?new RemoteSocialController(service,contextDriver!,assertAccess,media?(request,account)=>media.authorize(request,account):undefined,{allowDelete:capabilities.delete}):undefined;
+  const workflows=capabilities.schedule?new RemoteWorkflowController(service,contextDriver!,social!,assertAccess,media):undefined;
+  const browser=capabilities.browserFallback?new RemoteBrowserController(service,contextDriver!,assertAccess):undefined;
+  const reads=capabilities.extendedReads||capabilities.messages?new RemoteReadController(service,contextDriver!,assertAccess,capabilities):undefined;
+  const api=capabilities.officialApi?new RemoteOfficialApiController(service,assertAccess,{allowDelete:capabilities.delete}):undefined;
+  function invalidate(){social?.invalidatePrepared();media?.invalidate();workflows?.invalidate();browser?.invalidate();reads?.invalidate();api?.invalidate();}
   // A revoked/missing token leaves HTTP alive but fails closed, even under a supervisor.
   let busy=false;
   const send=(res:ServerResponse,status:number,error:string)=>{res.writeHead(status,{'Content-Type':'application/json'}).end(JSON.stringify({error}));};
@@ -96,15 +121,14 @@ export async function startRemoteHttp(service:ThreadsService,options:{port:numbe
       res.setHeader('WWW-Authenticate','Bearer realm="threads-mcp"');send(res,401,'Unauthorized');return;
     }
     if(req.url==='/healthz'&&req.method==='GET'){
-      const health=await remoteHealth(service,!busy);res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify({...health,mediaEnabled:!!media,busy}));return;
+      const health=await remoteHealth(service,!busy);res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify({...health,mediaEnabled:!!media,capabilities,busy}));return;
     }
     if(req.url!=='/mcp'){send(res,404,'Not found');return;}
     if(req.method!=='POST'){res.setHeader('Allow','POST');send(res,405,'Use MCP JSON POST');return;}
     if(!/^application\/json(?:\s*;|$)/i.test(req.headers['content-type']??'')){send(res,415,'JSON required');return;}
     if(Number(req.headers['content-length']??0)>MAX_BODY){send(res,413,'Request too large');return;}
-    if(busy){res.setHeader('Retry-After','3');send(res,429,'Another remote request is in progress');return;}
-    // Held through response-body completion, across all nested research operations.
-    busy=true;requestCredential=token;let server:ReturnType<typeof createServer>|undefined;
+    const startedBusy=busy;let ownsLock=false;let server:ReturnType<typeof createServer>|undefined;
+    if(!startedBusy){busy=true;requestCredential=token;ownsLock=true;}
     try{
       const chunks:Buffer[]=[];let bytes=0;
       for await(const chunk of req){const b=Buffer.from(chunk);bytes+=b.length;if(bytes>MAX_BODY){send(res,413,'Request too large');return;}chunks.push(b);}
@@ -115,7 +139,18 @@ export async function startRemoteHttp(service:ThreadsService,options:{port:numbe
       // A slow request authenticated with A cannot inherit a later B credential epoch.
       let currentToken:string|undefined;try{currentToken=options.readToken();}catch{}
       if(currentToken!==token||credentialEpoch!==token){invalidate();send(res,401,'Authorization changed');return;}
-      server=createServer(service,{remoteReadOnly:!social,remoteSocial:social,remoteMedia:media});
+      if(startedBusy){
+        const call=parsed as any;
+        if(workflows&&call.jsonrpc==='2.0'&&(typeof call.id==='string'||typeof call.id==='number')&&call.method==='tools/call'&&call.params?.name==='threads_cancel_schedule'){
+          // Only a synchronous exact-active-job cancellation may bypass the whole-run lock.
+          // This request never changes the run's requestCredential or releases its lock.
+          try{const result=workflows.cancelRunning(call.params.arguments);res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify({jsonrpc:'2.0',id:call.id,result:{content:[{type:'text',text:JSON.stringify(result)}],structuredContent:result}}));}
+          catch(error){const code=(error as {code?:string}).code;res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify({jsonrpc:'2.0',id:call.id,result:{isError:true,content:[{type:'text',text:JSON.stringify({error:typeof code==='string'&&/^[A-Z_]+$/.test(code)?code:'REMOTE_OPERATION_FAILED'})}]}}));}
+          return;
+        }
+        res.setHeader('Retry-After','3');send(res,429,'Another remote request is in progress');return;
+      }
+      server=createServer(service,{remoteReadOnly:!social,remoteSocial:social,remoteMedia:media,capabilities,remoteWorkflows:workflows,remoteBrowser:browser,remoteReads:reads,remoteApi:api});
       const transport=new WebStandardStreamableHTTPServerTransport({sessionIdGenerator:undefined,enableJsonResponse:true,maxRequestBodySize:MAX_BODY});
       await server.connect(transport);
       const headers=new Headers();for(const name of ['accept','content-type','mcp-protocol-version','mcp-session-id']){const v=req.headers[name];if(typeof v==='string')headers.set(name,v);}
@@ -123,11 +158,11 @@ export async function startRemoteHttp(service:ThreadsService,options:{port:numbe
       const output=Buffer.from(await response.arrayBuffer());
       res.statusCode=response.status;response.headers.forEach((v,k)=>res.setHeader(k,v));res.end(output);
     }catch{if(!res.headersSent)send(res,500,'Remote request failed');else res.end();}
-    finally{await server?.close().catch(()=>{});requestCredential=undefined;busy=false;}
+    finally{await server?.close().catch(()=>{});if(ownsLock){requestCredential=undefined;busy=false;}}
   }
   const http=createHttpServer({maxHeaderSize:16*1024,requestTimeout:15_000,headersTimeout:10_000},(req,res)=>{void handle(req,res).catch(()=>{if(!res.headersSent)send(res,500,'Remote request failed');else res.end();});});
   http.maxConnections=16;
-  http.once('close',()=>{social?.invalidatePrepared();media?.close();});
+  http.once('close',()=>{invalidate();media?.close();workflows?.close();});
   await new Promise<void>((resolve,reject)=>{http.once('error',reject);http.listen(options.port,'127.0.0.1',()=>{http.off('error',reject);resolve();});});
   return http;
 }

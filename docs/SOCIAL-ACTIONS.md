@@ -1,5 +1,21 @@
 # Prepared browser social actions
 
+## Remote named actions and final deletion (v0.7.0)
+
+`THREADS_REMOTE_ALLOW_WRITES=true` preserves the eleven existing remote social kinds. `THREADS_REMOTE_ALLOW_DELETE=true` additionally enables `kind:"delete"` and two distinct confirmation tools. Deletion always targets an exact own-account `/@handle/post/code` permalink; generic browser fallback cannot reach delete controls.
+
+1. `threads_prepare_social({kind:"delete",targetUrl,expectedAccount})` opens/binds the exact own-post menu without deleting.
+2. After review and specific user intent, `threads_execute_social({id,expectedAccount})` consumes that ID once. A confirmation dialog returns `confirmation-required`; the final button is untouched.
+3. Obtain a **new explicit final-delete authorization**. `threads_prepare_confirmation({sourceId:ORIGINAL_ID,expectedAccount,purpose})` binds a separately observed dialog and returns a new single-use ID with a maximum 90-second expiry.
+4. Review that ID and target, then `threads_execute_confirmation({id:CONFIRMATION_ID,expectedAccount})` dispatches the final confirmation once. It reports `outcome-uncertain`; disappearance alone cannot prove deletion. Never retry that ID or automatically reprepare deletion.
+
+The confirmation binds the consumed first action, source card and full fingerprint, account, route, dialog identity, explicit heading, unique Delete/Cancel controls and their fingerprints. Trusted manual input/Escape, route changes, replacements/removal/reinsertion, expiry, restart and bearer invalidation stop later dispatch. Network failure after an attempt preserves uncertainty. Access is rechecked immediately before the native command POST, after the asynchronous pairing/status preflight.
+
+Remote media remains begin → chunks → status → finish → prepare_social(mediaToken) → review → execute once. It accepts bytes, not arbitrary local paths. Browser alt text remains unsupported and unknown alt-text fields are rejected; the separately enabled official API supports `alt_text` in its container schema. This is a distinct API-token/permission path, not a browser workaround.
+
+These contracts have offline and intercepted Chrome fixtures. They are not evidence of a real-account deletion, post or media publication. Use the manual acceptance checklist in [Remote MCP](REMOTE-MCP.md#manual-live-acceptance-checklist) only for specifically authorized content.
+
+
 `SocialActions` coordinates a staged browser action with a one-use runtime token. The service must run its `prepare` and `execute` calls under the same operation mutex as other navigation and browser tools. Both staging and commit require `THREADS_ALLOW_WRITES=true`. Tests never mutate a real Threads account.
 
 Browser Stop/disconnect cancels the current social preparation and advances a generation guard. Pending menu/composer waits cannot continue to fill text, click another preparation control, or create a usable token after cancellation. Already entered draft text remains available for manual review.

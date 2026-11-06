@@ -1,4 +1,4 @@
-# Reliable remote MCP: read-only and controlled writes
+# Controlled remote Threads MCP
 
 Use a **Cloudflare remotely managed tunnel with a fixed hostname** for Grok Bot. Quick Tunnel is only for temporary debugging. The endpoint uses authenticated, stateless Streamable HTTP with JSON responses; cookies stay in the owner's Chrome.
 
@@ -9,6 +9,81 @@ Use a **Cloudflare remotely managed tunnel with a fixed hostname** for Grok Bot.
 The default read-only mode exposes exactly 15 remote tools: `threads_status`, `threads_search`, `threads_research`, `threads_my_activity`, `threads_find_mentions`, `threads_get_post`, `threads_get_post_activity`, `threads_get_replies`, `threads_get_profile`, `threads_get_connections`, `threads_check_relationship`, `threads_search_users`, `threads_discover`, `threads_reply_inbox`, `threads_batch_read`.
 
 In default read-only mode, no messages, notifications, arbitrary browser controls, social writes, media uploads, official API, drafts, schedules or filesystem export tools are registered. Writes stay disabled even if `THREADS_ALLOW_WRITES=true` is inherited. Explicit controlled mode adds three named social tools using `THREADS_REMOTE_ALLOW_WRITES`. A second, narrower `THREADS_REMOTE_ALLOW_MEDIA` opt-in adds one byte-upload tool; see the media contract below. Observations use the separate `remote-index` directory. Allowed reads include liked/saved posts and personal activity; give access only to a trusted client. Results are bounded observations, not complete history.
+
+## Capability matrix (v0.7.0)
+
+All flags default to `false`. Existing deployments retain 15 tools by default, 18 with writes, and 19 with writes + media. Additional groups are additive; the full surface has **44 remote tools**. `threads_status.tools` is the authoritative list, and both status and `/healthz` return the six capability booleans below. A capability is permission to use its controlled workflow, not authorization for a particular account effect.
+
+| Environment flag | Prerequisite | Added tools | Total with only this group plus prerequisites |
+|---|---|---:|---:|
+| `THREADS_REMOTE_ALLOW_WRITES` | none | 3: inspect/prepare/execute social | 18 |
+| `THREADS_REMOTE_ALLOW_MEDIA` | writes | 1: stage media remote | 19 |
+| `THREADS_REMOTE_ALLOW_EXTENDED_READS` | none | 5: notifications, feed, collect, trends, observed analytics | 20 |
+| `THREADS_REMOTE_ALLOW_DELETE` | writes | 2: prepare/execute confirmation; also adds social `kind=delete` | 20 |
+| `THREADS_REMOTE_ALLOW_SCHEDULE` | writes | 9: draft/schedule family | 27 |
+| `THREADS_REMOTE_ALLOW_BROWSER_FALLBACK` | writes | 4: snapshot, scroll, prepare/execute action | 22 |
+| `THREADS_REMOTE_ALLOW_MESSAGES` | none | 1: get messages | 16 |
+| `THREADS_REMOTE_ALLOW_OFFICIAL_API` | writes and host API configuration for actual requests | 4: API status/read/prepare/execute | 22 |
+
+The matching capability keys are `extendedReads`, `delete`, `schedule`, `browserFallback`, `messages`, `officialApi`. The top-level `writesEnabled` and `mediaEnabled` retain their meanings. Extended reads use an additional explicit flag so the original 15/18/19 configurations do not silently gain notification-read effects or extra tools.
+
+Exact additions to the original 19-tool media mode:
+
+- Extended reads: `threads_get_notifications`, `threads_get_feed`, `threads_collect`, `threads_trends`, `threads_observed_analytics`.
+- Delete: `threads_prepare_confirmation`, `threads_execute_confirmation`.
+- Workflows: `threads_save_draft`, `threads_list_drafts`, `threads_delete_draft`, `threads_stage_schedule`, `threads_list_schedules`, `threads_authorize_schedule`, `threads_cancel_schedule`, `threads_run_schedules`, `threads_reconcile_schedule`.
+- Browser fallback: `threads_browser_snapshot`, `threads_browser_scroll`, `threads_prepare_action`, `threads_execute_action`.
+- Messages: `threads_get_messages`. When both extended reads and messages are enabled, `threads_get_feed(kind="messages")` uses the same guarded reader.
+- Official API: `threads_api_status`, `threads_api_read`, `threads_api_prepare`, `threads_api_execute`.
+
+The full 44-tool count equals the local count, but the surfaces differ. HTTP deliberately omits `threads_read_page`, local-path `threads_stage_media`, `threads_export` and browser `threads_account_insights`. Remote replacements are byte upload, guarded messages and two explicit deletion-confirmation tools. Account insights remain available through the optional API when its permissions permit. No arbitrary JavaScript, shell, filesystem read, raw DOM click, settings or private-message send tool is registered.
+
+### Choose and deploy a mode
+
+For regular use, enable the needed groups. A broad **39-tool** configuration enables everything below except messages and official API. The following **44-tool** example explicitly enables both sensitive options for a trusted client; do not treat it as permission to test real mutations.
+
+**Privacy warning:** messages reads can reveal any content rendered on the messages route and may mark messages seen. Notifications may also update read state. Neither private view is indexed in the remote search database. Official API uses separate host-owned credentials and permissions; Chrome login does not configure it.
+
+```powershell
+$env:THREADS_REMOTE_ALLOW_WRITES = 'true'
+$env:THREADS_REMOTE_ALLOW_MEDIA = 'true'
+$env:THREADS_REMOTE_ALLOW_EXTENDED_READS = 'true'
+$env:THREADS_REMOTE_ALLOW_DELETE = 'true'
+$env:THREADS_REMOTE_ALLOW_SCHEDULE = 'true'
+$env:THREADS_REMOTE_ALLOW_BROWSER_FALLBACK = 'true'
+$env:THREADS_REMOTE_ALLOW_MESSAGES = 'true'      # Private visible content; may mark seen
+$env:THREADS_REMOTE_ALLOW_OFFICIAL_API = 'true'  # Existing host API configuration only
+node dist/cli.js serve-http
+```
+
+For this v0.7.0 upgrade, restart the owned bridge and HTTP processes for the new native command allowlist, preserving the tunnel. For later flag-only changes, restart only the HTTP process. For supervised hosts, edit the matching `remote*Enabled` booleans in the private config and use Stop → validate → Start; see [Windows host](WINDOWS-REMOTE-HOST.md). Never put token values into these examples or configuration JSON. When API credentials are absent, HTTP still starts and `threads_api_status` reports unconfigured; API requests fail closed. The supervisor forwards existing API environment configuration only to an explicitly enabled HTTP child.
+
+Upgrade the host and extension together to v0.7.0, reload the unpacked extension and reconnect the selected tab. The local bridge must also restart for the new command allowlist; use its newly issued pairing code locally. Keep the remote bearer and tunnel URL unchanged unless intentionally rotating them. Refresh Grok's existing command MCP schema; no URL or header-file change is required for an unchanged endpoint. Loaded versions and actual reads must be checked before claiming activation. Updating files alone does not replace an existing process.
+
+### Controlled behavior and limits
+
+Deletion uses `prepare_social(kind="delete")` → review → `execute_social`. A `confirmation-required` response stops there. Obtain a **separate explicit final-delete authorization**, call `prepare_confirmation(sourceId,expectedAccount,purpose)`, review its new ID, and call `execute_confirmation` once. Final deletion remains `outcome-uncertain`; disappearance alone is not proof. Unsupported dialogs fail closed. The generic fallback cannot confirm deletion.
+
+The browser fallback exposes only vetted public links and search navigation. Snapshot observes the current page; it accepts no URL. `click` means an approved link destination, and `fill` means an approved public search query. Consume validates account, source route, reference, draft and trusted manual-interaction state, then dispatches the fixed navigation in the same runtime turn. The response is `navigation-unverified`; a separate snapshot observes the destination. No DOM button click, text-entry event, message send or settings change occurs. Lost receipts remain single-use and must not be replayed.
+
+Notifications/feed/messages require `expectedAccount`, explicit `purpose` and 0–3 additional read windows. A short-lived source binding is rechecked in the page immediately before the one navigation. Unknown values stay unknown, and windows remain partial. Message conversation clicks/sends are unsupported; visible split-pane content may be included if Threads already renders it.
+
+Remote workflows use immutable account-bound drafts and separate stage → authorize → run calls. Browser publishing uses the existing social preparation/commit controller; no API credentials are needed. Run is explicit, at most 3 jobs and 20 remaining parts, with no timer or punctuality guarantee. Host, Chrome and the client runner must remain available. The remote database is separate from local stdio workflows; `schedule-worker` does not automatically pick up these remote jobs. Cancellation is the one authenticated MCP exception to the busy lock: only the exact active account/job can set its stop flag. A cancelled job cannot send an effect still waiting in native preflight; already dispatched outcomes are preserved.
+
+Media drafts accept only an existing remote `mediaToken`, not a local path or download URL. Its ten-minute, same-composer, account/kind/target approval is not extended by scheduling, so long-term media scheduling is not supported. A later chain part cannot prebind media to an unknown parent. Confirmed parts never replay; uncertainty halts the chain. Root text outcomes can be reconciled against a fresh exact own post. Media/reply/quote relationships cannot be promoted to confirmed by free-text evidence. Browser alt text remains explicitly unsupported; official API image/video containers accept `alt_text` under the separate API gate. See [workflows](WORKFLOWS.md) and [social actions](SOCIAL-ACTIONS.md).
+
+API preparation/execute require the configured numeric `expectedAccount` and an explicit purpose at preparation. Credentials never come from tool arguments. API delete additionally requires the DELETE flag. Revocation is checked before every API network dispatch; unknown mutation outcomes are consumed, not retried. Browser delete confirmation and API deletion are separate contracts: a reviewed API delete is itself the explicit final deletion authorization.
+
+### Manual live acceptance checklist
+
+Offline and isolated fixtures verify these contracts without changing a real account. For an installation:
+
+1. Check anonymous HTTPS returns 401; inspect authenticated status/health, flags and exact tool list.
+2. Confirm loaded host/extension/runtime versions, then perform two ordinary expected-account profile reads. Verify partial provenance and the next read cycle.
+3. Refresh Grok's existing command MCP and repeat schema/status plus a safe read from Grok. Host-side proxy tests are not proof of a Grok-owned run.
+4. Do not read messages/notifications solely as a connection test. Exercise them only when the user specifically requests that view and accepts read-state effects.
+5. Test a social action, media upload, deletion or scheduled publication only against specifically authorized real content. Review every prepared ID. For deletion stop at the first confirmation and request separate final intent.
+6. For uncertain results retain the ID/evidence, inspect actual state, and never automatically resend. Test cancellation/revoke/restart safety with offline fixtures, not repeated live publications.
 
 ### Direct public-profile pagination (v0.5.0)
 
@@ -137,7 +212,7 @@ Use the printed HTTPS hostname plus /mcp. It changes on restart and has no uptim
 
 ## Controlled remote writes (v0.5.1, explicit opt-in)
 
-The default remains 15 read tools. Enabling `THREADS_REMOTE_ALLOW_WRITES=true` for `serve-http` adds exactly three existing named capabilities: `threads_inspect_social`, `threads_prepare_social`, and `threads_execute_social`, for 18 tools total. `THREADS_ALLOW_WRITES` alone cannot enable remote writes. The v0.5.1 text-only change required no extension update. Remote media in v0.6.0 requires the matching v0.6.0 extension/runtime.
+The default remains 15 read tools. Enabling `THREADS_REMOTE_ALLOW_WRITES=true` for `serve-http` adds exactly three existing named capabilities: `threads_inspect_social`, `threads_prepare_social`, and `threads_execute_social`, for 18 tools total. `THREADS_ALLOW_WRITES` alone cannot enable remote writes. The v0.5.1 text-only change required no extension update. Media requires matching host and extension/runtime; current release is v0.7.0.
 
 ```powershell
 # Apply when starting/restarting the HTTP host, with the existing bridge left running.
@@ -147,7 +222,7 @@ node dist/cli.js serve-http
 
 To disable, stop only that HTTP host and restart it with the variable removed or set to `false`. A supervisor installation uses the explicit `remoteWritesEnabled` config instead; see [Windows setup](WINDOWS-REMOTE-HOST.md). Do not start duplicate listeners. Restarting HTTP invalidates preparations but preserves the existing bearer and bridge pairing.
 
-The same bearer now grants access to the enabled tools. Supported kinds are `publish`, `reply`, `quote` (text only, up to 500 characters), `like`, `unlike`, `save`, `unsave`, `repost`, `unrepost`, `follow`, and `unfollow`. Deletion, private messages, local file access, schedules, official API and arbitrary UI controls remain unavailable. Byte uploads require the separate media opt-in below.
+The same bearer now grants access to the enabled tools. Supported kinds are `publish`, `reply`, `quote` (text only, up to 500 characters), `like`, `unlike`, `save`, `unsave`, `repost`, `unrepost`, `follow`, and `unfollow`. With only the writes flag enabled, deletion, private messages, schedules and official API remain unavailable. Additional flags are listed in the capability matrix; arbitrary UI controls and local file access stay excluded. Byte uploads require the separate media opt-in below.
 
 Both inspect and prepare require `expectedAccount`, `kind` and `targetUrl`; text is accepted only for publication/reply/quote. Publishing uses `https://www.threads.com/`, follow operations use the exact profile URL, and post operations use the full author/post permalink. The controller checks the account and absence of drafts/dialogs before optional target navigation, checks again before staging, and preserves existing draft content. Resolve a blocked composer locally rather than overwriting it.
 
@@ -157,7 +232,7 @@ Enabling capabilities is not authorization to publish or interact. Execute only 
 
 ## Controlled remote media (v0.6.0)
 
-This implementation chooses **client-supplied chunks**. It needs neither public media hosting nor an official API token. It accepts no download URL and no host filesystem path. `threads_stage_media` and all `threads_api_*` tools remain absent from HTTP. The existing bearer, pairing boundary and loopback-only ports are unchanged.
+This implementation chooses **client-supplied chunks**. It needs neither public media hosting nor an official API token. It accepts no download URL and no host filesystem path. Local-path `threads_stage_media` remains absent from HTTP. API tools appear only under their separate official-API flag. The existing bearer, pairing boundary and loopback-only ports are unchanged.
 
 | Remote write flag | Remote media flag | Tools and behavior |
 |---|---|---|
@@ -174,7 +249,7 @@ $env:THREADS_REMOTE_ALLOW_MEDIA = 'true'
 node dist/cli.js serve-http
 ```
 
-For the supervisor use `remoteWritesEnabled:true` and `remoteMediaEnabled:true` in its private configuration and follow [Stop → validate → Start](WINDOWS-REMOTE-HOST.md). Do not start a duplicate listener. Reload the unpacked **v0.6.0** extension and reconnect the selected tab locally after updating it. The host requires the runtime media capability marker before opening a composer. Restart/reconnect Grok's existing command MCP to refresh the schema; keep its HTTPS URL and private header file. Verify `writesEnabled:true`, `mediaEnabled:true` and 19 tools. Enabling media is authority to stage supported bytes, not permission to publish arbitrary content.
+For the supervisor use `remoteWritesEnabled:true` and `remoteMediaEnabled:true` in its private configuration and follow [Stop → validate → Start](WINDOWS-REMOTE-HOST.md). Do not start a duplicate listener. Reload the unpacked **v0.7.0** extension and reconnect the selected tab locally after updating it. The host requires the runtime media capability marker before opening a composer. Restart/reconnect Grok's existing command MCP to refresh the schema; keep its HTTPS URL and private header file. Verify `writesEnabled:true`, `mediaEnabled:true` and 19 tools. Enabling media is authority to stage supported bytes, not permission to publish arbitrary content.
 
 ### One bounded upload tool
 
@@ -200,4 +275,4 @@ HTTP restart expires incomplete uploads and prior media approvals; an interrupte
 
 Successful stage returns `mediaToken`, `published:false`, `previewReady:null`: file assignment occurred, but preview/processing readiness has not yet been established. Call `threads_prepare_social` with that token, the same account/kind/target, and the explicitly approved nonempty text (at most 500 characters). Preparation verifies exact attachment objects, visible previews and the empty editor before filling text. Review the returned request/account/ID/expiry, then call `threads_execute_social` with **only** `id` and `expectedAccount`; media is already bound and cannot be replaced at execution. The ID expires after 90 seconds and is consumed once. The current browser verifier intentionally cannot prove that platform-rendered attachments match the uploaded bytes. Even when it finds a new exact-caption post, media returns `publication-observed-media-unverified` and execution remains `outcome-uncertain`, with a candidate post URL when observed. A successful dispatch is not a verified publication result. Inspect actual posts and attachments before another action; never replay execute.
 
-One MCP HTTP request remains active at a time, including chunks and the entire finish transfer. Other requests receive **429** with `Retry-After`; during finish, even `status` may be busy until the outstanding request ends. Authenticated `/healthz` remains available with `busy:true` and cached bridge state/its original `checkedAt`; it does not read the composer or prove upload progress. Between chunk calls, health may refresh transport status. Use `status` for acknowledged upload progress. Give a finish call an adequate client timeout (up to five minutes); a timeout never authorizes resending it.
+One MCP HTTP request remains active at a time, including chunks and the entire finish transfer. Other requests receive **429** (except exact authenticated active-schedule cancellation) with `Retry-After`; during finish, even `status` may be busy until the outstanding request ends. Authenticated `/healthz` remains available with `busy:true` and cached bridge state/its original `checkedAt`; it does not read the composer or prove upload progress. Between chunk calls, health may refresh transport status. Use `status` for acknowledged upload progress. Give a finish call an adequate client timeout (up to five minutes); a timeout never authorizes resending it.

@@ -6,9 +6,11 @@ import type { Config } from './config.js';
 import { ThreadsError } from './types.js';
 import { threadsUrl } from './urls.js';
 import { validateDirectProfileCommand } from './direct-profile-command.js';
+import { validateRemoteBrowserCommand } from './remote-browser-runtime.js';
 
 export interface BrowserDriver {
-  command<T>(command: Record<string, unknown>): Promise<T>;
+  /** Optional guard must be checked immediately before native transport dispatch. */
+  command<T>(command: Record<string, unknown>, dispatchGuard?: () => void): Promise<T>;
   status(): unknown;
   /** Fresh transport health only; never navigates or asserts signed-in application health. */
   refreshStatus?(): Promise<unknown>;
@@ -24,8 +26,13 @@ function validate(input: Record<string, unknown>): Record<string, unknown> {
       break;
     case 'read': case 'snapshot': case 'screenshot': break;
     case 'direct_profile': validateDirectProfileCommand(command); break;
+    case 'remote_view':
+      if(Object.keys(command).some(key=>!['type','kind','expectedAccount','navigationToken'].includes(key))||!['for_you','following','saved','liked','notifications','messages'].includes(String(command.kind))||typeof command.expectedAccount!=='string'||!/^@?[A-Za-z0-9_.]{1,30}$/.test(command.expectedAccount))throw new ThreadsError('INVALID_COMMAND','Invalid remote view.');
+      if(typeof command.navigationToken!=='string'||!/^[a-f0-9-]{36}$/i.test(command.navigationToken))throw new ThreadsError('INVALID_COMMAND','Invalid view binding.');
+      break;
+    case 'remote_browser': validateRemoteBrowserCommand(command); break;
     case 'social':
-      if(!['stage','commit','inspect'].includes(String(command.operation)))throw new ThreadsError('INVALID_COMMAND','Unknown social operation.');
+      if(!['stage','commit','inspect','prepare_confirmation','commit_confirmation'].includes(String(command.operation)))throw new ThreadsError('INVALID_COMMAND','Unknown social operation.');
       break;
     case 'media':
       if(!['begin','chunk','finish','abort'].includes(String(command.operation)))throw new ThreadsError('INVALID_COMMAND','Unknown media operation.');
@@ -148,7 +155,7 @@ export class DedicatedDriver extends SerializedDriver {
         readPage(): unknown; snapshot(): unknown; interact(args: unknown): unknown;
         scroll(pixels: number): unknown; openReadPanel(panel: string,activityTab?:string): unknown;
         directProfile(args: { username: string; maxPages: number; pageSize: number }): unknown;
-        socialStage(request:unknown):unknown; socialCommit(token:string,expectedAccount:string):unknown; socialInspect(request:unknown,token?:string):unknown;media(command:unknown):unknown;
+        remoteView(command:Record<string,unknown>):unknown;remoteBrowser(command:Record<string,unknown>):unknown;socialPrepareConfirmation(sourceToken:string,expectedAccount:string):unknown;socialCommitConfirmation(token:string,expectedAccount:string):unknown;socialStage(request:unknown):unknown; socialCommit(token:string,expectedAccount:string):unknown; socialInspect(request:unknown,token?:string):unknown;media(command:unknown):unknown;
       } }).ThreadsMCP;
       if (!api) return { error: { code: 'RUNTIME_UNAVAILABLE', message: 'Browser runtime is unavailable in this document.' } };
       try {
@@ -160,7 +167,9 @@ export class DedicatedDriver extends SerializedDriver {
           case 'interact': result = await api.interact(command); break;
           case 'scroll': result = await api.scroll(command.pixels as number); break;
           case 'open_read_panel': result = await api.openReadPanel(command.panel as string,command.activityTab as string|undefined); break;
-          case 'social': result = command.operation==='stage'?await api.socialStage(command.request):command.operation==='commit'?await api.socialCommit(command.token as string,command.expectedAccount as string):await api.socialInspect(command.request,command.token as string|undefined);break;
+          case 'social': result = command.operation==='stage'?await api.socialStage(command.request):command.operation==='commit'?await api.socialCommit(command.token as string,command.expectedAccount as string):command.operation==='prepare_confirmation'?await api.socialPrepareConfirmation(command.sourceToken as string,command.expectedAccount as string):command.operation==='commit_confirmation'?await api.socialCommitConfirmation(command.token as string,command.expectedAccount as string):await api.socialInspect(command.request,command.token as string|undefined);break;
+          case 'remote_view': result=await api.remoteView(command);break;
+          case 'remote_browser': result=await api.remoteBrowser(command);break;
           case 'media': result=await api.media(command);break;
           default: throw new Error('INVALID_COMMAND: Unsupported command.');
         }

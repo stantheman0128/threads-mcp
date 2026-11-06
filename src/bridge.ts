@@ -5,11 +5,16 @@ import { createServer, type Server, type IncomingMessage, type ServerResponse } 
 import { WebSocket, WebSocketServer } from 'ws';
 import { ThreadsError } from './types.js';
 import { validateDirectProfileCommand } from './direct-profile-command.js';
+import { validateRemoteBrowserCommand } from './remote-browser-runtime.js';
 
 interface BridgeOptions { dataDir: string; port?: number; commandTimeoutMs?: number; authTimeoutMs?: number }
 interface BoundTab { id: number; url: string; title?: string }
 interface Pending { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }
 const MAX_PAYLOAD = 4 * 1024 * 1024;
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+function exactCommand(command: Record<string, unknown>, fields: string[]): boolean {
+  return Object.keys(command).length === fields.length && fields.every(key => Object.hasOwn(command, key));
+}
 
 export function isThreadsUrl(value: unknown): value is string {
   if (typeof value !== 'string') return false;
@@ -28,8 +33,26 @@ function validateCommand(command: Record<string, unknown>): void {
       break;
     case 'read': case 'snapshot': case 'screenshot': break;
     case 'direct_profile': validateDirectProfileCommand(command); break;
+    case 'remote_browser':
+      try { validateRemoteBrowserCommand(command); }
+      catch { throw new ThreadsError('INVALID_COMMAND', 'Invalid remote browser command.'); }
+      break;
+    case 'remote_view':
+      if (!exactCommand(command, ['type','kind','expectedAccount','navigationToken']) ||
+          !['for_you','following','saved','liked','notifications','messages'].includes(String(command.kind)) ||
+          typeof command.expectedAccount !== 'string' || !/^@?[A-Za-z0-9_.]{1,30}$/.test(command.expectedAccount) ||
+          typeof command.navigationToken !== 'string' || !uuid.test(command.navigationToken))
+        throw new ThreadsError('INVALID_COMMAND', 'Invalid fixed remote view command.');
+      break;
     case 'social':
-      if(!['stage','commit','inspect'].includes(String(command.operation)))throw new ThreadsError('INVALID_COMMAND','Unknown social operation.');
+      if(!['stage','commit','inspect','prepare_confirmation','commit_confirmation'].includes(String(command.operation)))throw new ThreadsError('INVALID_COMMAND','Unknown social operation.');
+      if (command.operation === 'prepare_confirmation' || command.operation === 'commit_confirmation') {
+        const token = command.operation === 'prepare_confirmation' ? 'sourceToken' : 'token';
+        if (!exactCommand(command, ['type','operation',token,'expectedAccount']) ||
+            typeof command[token] !== 'string' || !uuid.test(command[token]) ||
+            typeof command.expectedAccount !== 'string' || !/^@?[A-Za-z0-9_.]{1,64}$/.test(command.expectedAccount))
+          throw new ThreadsError('INVALID_COMMAND', 'Invalid bound social confirmation command.');
+      }
       break;
     case 'media':
       if(!['begin','chunk','finish','abort'].includes(String(command.operation)))throw new ThreadsError('INVALID_COMMAND','Unknown media operation.');

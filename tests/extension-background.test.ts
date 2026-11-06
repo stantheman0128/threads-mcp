@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createContext, runInContext, runInNewContext } from 'node:vm';
+import { validateRemoteBrowserCommand } from '../src/remote-browser-runtime.js';
 
 const source = readFileSync(new URL('../extension/background.js', import.meta.url), 'utf8');
 function event() {
@@ -26,6 +27,8 @@ function harness(injectedVersion = '0.1.1') {
   let documentNumber = 0;
   let holdDirectProfile = false;
   let rejectDirectProfile: ((error: Error) => void) | undefined;
+  let holdRemoteBrowser = false;
+  let rejectRemoteBrowser: ((error: Error) => void) | undefined;
   const chrome = {
     runtime: { id: 'fixture', getManifest: () => ({ version: '0.1.1' }), onMessage: event() }, storage: { session: { set: async () => undefined } },
     tabs: { onUpdated, onRemoved: event(), get: async (id: number) => { calls.push({ kind: 'get', args: id }); return { ...tab }; },
@@ -45,6 +48,15 @@ function harness(injectedVersion = '0.1.1') {
         openReadPanel: (panel: string,activityTab?:string) => { calls.push({ kind: 'panel', args: {panel,activityTab} }); return { panel,activityTab }; },
         interact: () => { calls.push({ kind: 'interact' }); return { done: true }; },
         socialCommit: () => { calls.push({ kind: 'social-commit' }); return { dispatched: true }; },
+        socialPrepareConfirmation: (sourceToken: string, expectedAccount: string) => { calls.push({ kind: 'social-prepare-confirmation', args: { sourceToken, expectedAccount } }); return { token: 'final-token', published: false }; },
+        socialCommitConfirmation: (token: string, expectedAccount: string) => { calls.push({ kind: 'social-commit-confirmation', args: { token, expectedAccount } }); return { dispatched: true, verified: false }; },
+        validateRemoteBrowserCommand,
+        remoteView: (command: unknown) => { calls.push({ kind: 'remote-view', args: command }); return { dispatched: true, verified: false }; },
+        remoteBrowser: (command: unknown) => {
+          calls.push({ kind: 'remote-browser', args: command });
+          if (holdRemoteBrowser) return new Promise((_resolve, reject) => { rejectRemoteBrowser = reject; });
+          return { scope: 'public-read-navigation' };
+        },
         directProfile: (args: unknown) => {
           calls.push({ kind: 'direct-profile', args });
           if (holdDirectProfile) return new Promise((_resolve, reject) => { rejectDirectProfile = reject; });
@@ -52,6 +64,8 @@ function harness(injectedVersion = '0.1.1') {
         },
         cancelDirectProfiles: () => { calls.push({ kind: 'cancel-direct' }); rejectDirectProfile?.(new Error('DIRECT_PROFILE_CANCELLED: Cancelled.')); },
         cancelMediaTransfers: () => { calls.push({ kind: 'cancel-media' }); },
+        cancelRemoteBrowserActions: () => { calls.push({ kind: 'cancel-remote-browser' }); rejectRemoteBrowser?.(new Error('REMOTE_BROWSER_CANCELLED: Cancelled.')); },
+        cancelRemoteViews: () => { calls.push({ kind: 'cancel-remote-views' }); },
         cancelSocialActions: () => { calls.push({ kind: 'cancel-social' }); } };
       const result = await runInNewContext(`(${options.func.toString()})(...args)`, { args: options.args ?? [], ThreadsMCP: runtime,
         location: { href: page.url }, document: { readyState: page.readyState, body: { textContent: page.rawText, innerText: page.text } } });
@@ -68,6 +82,7 @@ function harness(injectedVersion = '0.1.1') {
   const api = (context as any).testing as { execute(command: object): Promise<any>; disconnect(): void; navigationCount(): number };
   return { api, tab, page, calls, onUpdated, focus: (value: boolean) => { focused = value; },
     holdDirectProfile: () => { holdDirectProfile = true; },
+    holdRemoteBrowser: () => { holdRemoteBrowser = true; },
     runtimeVersion: (value: string) => { runtimeVersion = value; },
     holdRuntimeProbe: (gate: Promise<void>) => { runtimeProbeGate = gate; },
     holdNavigationProbe: (gate: Promise<void>) => { navigationProbeGate = gate; },
@@ -107,7 +122,62 @@ test('disconnect cancels an in-flight direct profile and keeps media and social 
   assert.equal(h.calls.filter(call => call.kind === 'direct-profile').length, 1);
   h.api.disconnect();
   await rejected;
-  for (const kind of ['cancel-direct', 'cancel-media', 'cancel-social']) assert.equal(h.calls.filter(call => call.kind === kind).length, 1);
+  for (const kind of ['cancel-direct', 'cancel-media', 'cancel-social', 'cancel-remote-browser', 'cancel-remote-views']) assert.equal(h.calls.filter(call => call.kind === kind).length, 1);
+});
+
+test('remote browser/view and final confirmations dispatch once on the pinned hidden document', async () => {
+  const h = harness();
+  const token = '12345678-1234-4123-8123-123456789012';
+  const commands = [
+    { type: 'remote_view', kind: 'notifications', expectedAccount: 'fixture', navigationToken: token },
+    { type: 'remote_browser', operation: 'snapshot', expectedAccount: 'fixture' },
+    { type: 'social', operation: 'prepare_confirmation', sourceToken: token, expectedAccount: 'fixture' },
+    { type: 'social', operation: 'commit_confirmation', token, expectedAccount: 'fixture' },
+  ];
+  try {
+    for (const command of commands) {
+      await h.api.execute(command);
+      const scripts = h.calls.filter(call => call.kind === 'script');
+      assert.deepEqual([...scripts.at(-1)!.args.documentIds], ['document-0']);
+    }
+    for (const kind of ['remote-view', 'remote-browser', 'social-prepare-confirmation', 'social-commit-confirmation'])
+      assert.equal(h.calls.filter(call => call.kind === kind).length, 1);
+    const plain = (value: unknown) => JSON.parse(JSON.stringify(value));
+    assert.deepEqual(plain(h.calls.find(call => call.kind === 'remote-view')!.args), commands[0]);
+    assert.deepEqual(plain(h.calls.find(call => call.kind === 'remote-browser')!.args), commands[1]);
+    assert.deepEqual(plain(h.calls.find(call => call.kind === 'social-prepare-confirmation')!.args), { sourceToken: token, expectedAccount: 'fixture' });
+    assert.deepEqual(plain(h.calls.find(call => call.kind === 'social-commit-confirmation')!.args), { token, expectedAccount: 'fixture' });
+    await assert.rejects(h.api.execute({ ...commands[1], code: 'arbitrary' }), { code: 'INVALID_COMMAND' });
+    assert.equal(h.calls.filter(call => call.kind === 'remote-browser').length, 1);
+    assert.ok(!h.calls.some(call => ['focus', 'update', 'interact', 'social-commit'].includes(call.kind)));
+  } finally { h.cleanup(); }
+});
+
+test('remote browser/view cannot dispatch into a replacement document or after disconnect during probe', async () => {
+  for (const type of ['remote_browser', 'remote_view']) for (const disconnect of [false, true]) {
+    const h = harness(); let release!: () => void;
+    h.holdRuntimeProbe(new Promise<void>(resolve => { release = resolve; }));
+    const command = type === 'remote_browser' ? { type, operation: 'snapshot', expectedAccount: 'fixture' } :
+      { type, kind: 'following', expectedAccount: 'fixture', navigationToken: '12345678-1234-4123-8123-123456789012' };
+    try {
+      const pending = h.api.execute(command);
+      const rejected = disconnect ? assert.rejects(pending, { code: 'BRIDGE_DISCONNECTED' }) : assert.rejects(pending, /No matching document/);
+      await delay(0);
+      if (disconnect) h.api.disconnect(); else h.page.documentId = 'replacement';
+      release(); await rejected;
+      assert.equal(h.calls.filter(call => call.kind === 'remote-browser' || call.kind === 'remote-view').length, 0);
+    } finally { release(); h.cleanup(); }
+  }
+});
+
+test('disconnect cancels in-flight remote browser runtime and both remote state bindings', async () => {
+  const h = harness(); h.holdRemoteBrowser();
+  const pending = h.api.execute({ type: 'remote_browser', operation: 'snapshot', expectedAccount: 'fixture' });
+  const rejected = assert.rejects(pending, { code: 'REMOTE_BROWSER_CANCELLED' });
+  await delay(0); h.api.disconnect(); await rejected;
+  assert.equal(h.calls.filter(call => call.kind === 'remote-browser').length, 1);
+  assert.equal(h.calls.filter(call => call.kind === 'cancel-remote-browser').length, 1);
+  assert.equal(h.calls.filter(call => call.kind === 'cancel-remote-views').length, 1);
 });
 
 function connectionHarness() {
@@ -293,11 +363,16 @@ test('new runtime files with an old loaded extension remain readable but refuse 
   try {
     h.runtimeVersion('0.3.2');
     assert.equal((await h.api.execute({ type: 'read' })).extensionVersion, '0.1.1');
-    for (const command of [{type:'social',operation:'stage'}, {type:'social',operation:'commit'}, {type:'media',operation:'begin'}])
+    for (const command of [{type:'social',operation:'stage'}, {type:'social',operation:'commit'}, {type:'media',operation:'begin'},
+      {type:'social',operation:'prepare_confirmation',sourceToken:'12345678-1234-4123-8123-123456789012',expectedAccount:'fixture'},
+      {type:'social',operation:'commit_confirmation',token:'12345678-1234-4123-8123-123456789012',expectedAccount:'fixture'},
+      {type:'remote_browser',operation:'snapshot',expectedAccount:'fixture'},
+      {type:'remote_view',kind:'messages',navigationToken:'12345678-1234-4123-8123-123456789012',expectedAccount:'fixture'}])
       await assert.rejects(h.api.execute(command), {code:'RUNTIME_VERSION_MISMATCH'});
     h.tab.active = true; h.focus(true);
     await assert.rejects(h.api.execute({type:'interact',snapshotId:'s',ref:'button',verb:'click'}), {code:'RUNTIME_VERSION_MISMATCH'});
     assert.ok(!h.calls.some(call => call.kind === 'interact'));
+    assert.ok(!h.calls.some(call => ['remote-view','remote-browser','social-prepare-confirmation','social-commit-confirmation'].includes(call.kind)));
   } finally { h.cleanup(); }
 });
 

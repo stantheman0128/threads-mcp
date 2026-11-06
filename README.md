@@ -4,12 +4,12 @@ Grok Bot 可透過獨立金鑰保護的遠端 HTTP 入口，沿用帳號持有�
 
 **Grok Bot 安裝入口：[docs/GROK-BOT.md](docs/GROK-BOT.md)**。使用既有遠端服務時，Bot 只需 mcp-remote 與私有 header file，Chrome／Threads 登入留在帳號持有者電腦。本機 stdio 是另一種安裝方式；GitHub 連結本身不是遠端 MCP 端點。
 
-本機執行的 Threads MCP：沿用你選定的 Chrome 登入分頁，擷取可見貼文／互動資料，用本機多語 embedding 做語意與模糊搜尋，並提供草稿、媒體、準備後執行的社交操作與 optional 官方 API。v0.6.0 共 44 個 MCP 工具。Node.js 24+；已在 Windows PowerShell 驗證啟動與 stdio 協定。
+本機執行的 Threads MCP：沿用你選定的 Chrome 登入分頁，擷取可見貼文／互動資料，用本機多語 embedding 做語意與模糊搜尋，並提供草稿、媒體、準備後執行的社交操作與 optional 官方 API。v0.7.0 本機共 44 個 MCP 工具；遠端維持 15／18／19 基礎模式，分層全開為 44 個受控工具。Node.js 24+；已在 Windows PowerShell 驗證啟動與 stdio 協定。
 
 歷史實機驗證（2026-10-24）：231 項自動測試通過、1 項平台不適用跳過；完整瀏覽器驗收與五項背景流程通過。頁面程式修訂為 `20261024-readiness-3`。2026-11-06 公開匯出另通過預設測試、型別檢查、建置及 MCP 協定檢查；尚未在 Grok Bot 雲端環境實測。公開發文、實際刪除、媒體上傳與排程沒有在真實帳號上執行測試；各能力的證據與限制見 [VERIFICATION.md](docs/VERIFICATION.md)。
 
 **v0.5.0 公開個人貼文直接分頁已實測。** 對現有 `threads_get_profile` 傳入 `provider:"direct"`、`section:"posts"`、`maxPages:4`、`pageSize:5`，會沿用登入分頁直接連抓多頁，不需捲動。回傳每頁新增筆數、去重結果及停止原因；最多5頁，含初始頁，仍標示partial。HTTP、HTTPS與mcp-remote/header-file實測各取得4頁19篇，再接續取得另一目標3頁14篇。既有Grok連線需重啟／刷新工具schema，網址與金鑰不必更換。詳見 [使用指南](docs/GROK-BOT.md)。
-v0.5.1 支援明確啟用的遠端受控寫入：預設15個唯讀工具；設定 THREADS_REMOTE_ALLOW_WRITES=true 後為18個，新增檢查／準備／單次執行，保留帳號與內容核對。此模式為文字發文、回覆、引用及指定社交互動；另開 THREADS_REMOTE_ALLOW_MEDIA=true 才加入第19個分塊媒體工具。刪文、私訊與任意控制仍不開放。詳見 [受控寫入](docs/REMOTE-MCP.md#controlled-remote-writes-v051-explicit-opt-in) 與 [遠端媒體](docs/REMOTE-MCP.md#controlled-remote-media-v060)。
+v0.5.1 支援明確啟用的遠端受控寫入：預設15個唯讀工具；設定 THREADS_REMOTE_ALLOW_WRITES=true 後為18個，新增檢查／準備／單次執行，保留帳號與內容核對。此模式為文字發文、回覆、引用及指定社交互動；另開 THREADS_REMOTE_ALLOW_MEDIA=true 才加入第19個分塊媒體工具。v0.7.0 另以獨立開關提供刪文確認、草稿／串文排程、延伸讀取、私訊可見視窗、受限瀏覽器導覽及 optional API；任意控制仍不開放。完整工具矩陣見 [遠端能力](docs/REMOTE-MCP.md#capability-matrix-v070)。詳見 [受控寫入](docs/REMOTE-MCP.md#controlled-remote-writes-v051-explicit-opt-in) 與 [遠端媒體](docs/REMOTE-MCP.md#controlled-remote-media-v060)。
 
 ## 能做什麼
 
@@ -83,7 +83,7 @@ npm start
 
 Codex TOML 對應設定範例在 [docs/codex-mcp.toml](docs/codex-mcp.toml)。尚未自動修改你的全域 MCP 設定。
 
-MCP 伺服器、瀏覽器連接器與頁面 runtime 為 v0.6.0。升級媒體功能需重啟 HTTP、重新載入擴充功能並配對分頁；原有 bridge 可保留，無須因此更換配對碼或遠端 bearer。
+MCP 伺服器、瀏覽器連接器與頁面 runtime 為 v0.7.0。這次需重啟 bridge 與 HTTP、重新載入擴充功能，並使用本機配對頁的新配對碼重連；遠端 bearer 與 tunnel URL 可保留。
 
 ## 使用現有 Chrome 登入
 

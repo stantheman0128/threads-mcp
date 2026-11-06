@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
 import { request } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { WebSocket } from 'ws';
 import { BridgeServer, isThreadsUrl } from '../src/bridge.js';
 
@@ -72,6 +73,49 @@ test('standalone bridge validates and forwards bounded direct profile reads exac
     for (const invalid of [{ ...command, url: 'https://example.test' }, { ...command, username: '../x' }, { ...command, maxPages: 6 }])
       await assert.rejects(bridge.command(invalid), { code: 'INVALID_COMMAND' });
     assert.deepEqual(received, [command]);
+  } finally { await cleanup(); }
+});
+
+test('authenticated RPC and WebSocket forward each remote view/browser/confirmation command once and reject extra fields', async () => {
+  const { bridge, pairing, cleanup } = await setup();
+  try {
+    const ws = await authenticated(pairing.port, pairing.token);
+    const received: unknown[] = [];
+    ws.on('message', data => {
+      const message = JSON.parse(String(data));
+      if (message.command) { received.push(message.command); ws.send(JSON.stringify({ id: message.id, result: { accepted: true } })); }
+    });
+    const token = randomUUID();
+    const commands = [
+      ...['for_you','following','saved','liked','notifications','messages'].map(kind => ({ type: 'remote_view', kind, expectedAccount: 'fixture', navigationToken: token })),
+      { type: 'remote_browser', operation: 'snapshot', expectedAccount: 'fixture' },
+      { type: 'remote_browser', operation: 'scroll', expectedAccount: 'fixture', pixels: 500 },
+      { type: 'remote_browser', operation: 'prepare', expectedAccount: 'fixture', snapshotId: token, ref: 'r1', verb: 'click', purpose: 'Open approved public profile' },
+      { type: 'remote_browser', operation: 'prepare', expectedAccount: 'fixture', snapshotId: token, ref: 'r2', verb: 'fill', value: 'approved search', purpose: 'Run approved public search' },
+      { type: 'remote_browser', operation: 'consume', expectedAccount: 'fixture', token },
+      { type: 'remote_browser', operation: 'invalidate' },
+      { type: 'social', operation: 'prepare_confirmation', sourceToken: token, expectedAccount: 'fixture' },
+      { type: 'social', operation: 'commit_confirmation', token, expectedAccount: 'fixture' },
+    ];
+    const rpc = (command: object) => fetch(`http://127.0.0.1:${pairing.port}/command`, { method: 'POST',
+      headers: { Authorization: `Bearer ${pairing.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(command) });
+    for (const command of commands) {
+      const response = await rpc(command); assert.equal(response.status, 200);
+      assert.deepEqual((await response.json() as any).result, { accepted: true });
+      const invalid = await rpc({ ...command, url: 'https://example.test/arbitrary' });
+      assert.equal(invalid.status, 400); assert.equal((await invalid.json() as any).error.code, 'INVALID_COMMAND');
+    }
+    for (const invalid of [
+      { ...commands[0], kind: 'settings' }, { ...commands[0], navigationToken: 'not-uuid' },
+      { ...commands[0], expectedAccount: '../other' }, { type: 'remote_view', kind: 'liked', expectedAccount: 'fixture' },
+      { type: 'remote_browser', operation: 'evaluate', code: 'arbitrary' },
+      { type: 'remote_browser', operation: 'scroll', expectedAccount: 'fixture', pixels: 2001 },
+      { type: 'social', operation: 'prepare_confirmation', token, expectedAccount: 'fixture' },
+      { type: 'social', operation: 'commit_confirmation', sourceToken: token, expectedAccount: 'fixture' },
+      { type: 'social', operation: 'commit_confirmation', token: 'invalid', expectedAccount: 'fixture' },
+      { type: 'social', operation: 'commit_confirmation', token, expectedAccount: '../other' },
+    ]) await assert.rejects(bridge.command(invalid), { code: 'INVALID_COMMAND' });
+    assert.deepEqual(received, commands);
   } finally { await cleanup(); }
 });
 

@@ -6,10 +6,38 @@ export { cancelDirectProfiles } from './direct-profile-runtime.js';
 export function directProfile(args: DirectProfileArgs) {
   return collectDirectProfile(args, { viewer: () => viewer().username, guard });
 }
-export {socialStage,socialCommit,socialInspect,cancelSocialActions} from './social-runtime.js';
+export {socialStage,socialCommit,socialInspect,socialPrepareConfirmation,socialCommitConfirmation,cancelSocialActions} from './social-runtime.js';
+export {remoteBrowser,validateRemoteBrowserCommand,cancelRemoteBrowserActions} from './remote-browser-runtime.js';
 export {media,cancelMediaTransfers} from './media-runtime.js';
-export const runtimeVersion='0.6.0';
-export const runtimeRevision='20261106-remote-media-1';
+export const runtimeVersion='0.7.0';
+export const runtimeRevision='20261106-remote-parity-1';
+let remoteViewEpoch=0,remoteViewWatching=false;
+let remoteViewBinding:{token:string;route:string;account:string|null;epoch:number;expires:number}|undefined;
+export function cancelRemoteViews(){remoteViewEpoch++;remoteViewBinding=undefined;}
+function remoteViewToken(){
+  if(!remoteViewWatching){remoteViewWatching=true;
+    for(const type of ['pointerdown','mousedown','touchstart','keydown','beforeinput','input','paste','cut','drop','wheel'])document.addEventListener(type,event=>{if(event.isTrusted)cancelRemoteViews();},true);
+    globalThis.addEventListener('pagehide',cancelRemoteViews);
+  }
+  const token=crypto.randomUUID();remoteViewBinding={token,route:location.href,account:viewer().username,epoch:remoteViewEpoch,expires:Date.now()+30000};return token;
+}
+
+/** Fixed remote view navigation: the last account/draft checks and dispatch share one JS turn. */
+export function remoteView(command:Record<string,unknown>){
+  const routes:Record<string,string>={for_you:'/',following:'/following/',saved:'/saved/',liked:'/liked/',notifications:'/activity',messages:'/messages/'};
+  if(command.type!=='remote_view'||Object.keys(command).some(key=>!['type','kind','expectedAccount','navigationToken'].includes(key))||
+    typeof command.kind!=='string'||!Object.hasOwn(routes,command.kind)||typeof command.expectedAccount!=='string'||!/^@?[A-Za-z0-9_.]{1,30}$/.test(command.expectedAccount))throw new Error('INVALID_COMMAND: Invalid remote view.');
+  guard();
+  const expected=command.expectedAccount.replace(/^@/,'').toLowerCase();
+  const binding=remoteViewBinding;remoteViewBinding=undefined;
+  if(!binding||binding.token!==command.navigationToken||binding.route!==location.href||binding.epoch!==remoteViewEpoch||binding.expires<Date.now()||binding.account!==expected)throw new Error('REMOTE_VIEW_STALE: The read-view binding changed.');
+  if(viewer().username?.toLowerCase()!==expected)throw new Error('ACCOUNT_MISMATCH: Remote view account changed.');
+  const composer=readComposerState();
+  if(composer.present||composer.nonempty||composer.attachments||composer.ambiguous)throw new Error('COMPOSER_BUSY: Preserve the current composer.');
+  const destination='https://www.threads.com'+routes[command.kind];
+  location.assign(destination);
+  return {dispatched:true,verified:false,destination};
+}
 
 export interface ElementRef { ref: string; role: string; name: string; text: string; href?: string; editable: boolean; checked?: boolean; context: string; }
 export interface PageSnapshot { snapshotId: string; url: string; title: string; viewer: { username: string | null }; elements: ElementRef[]; text: string; }
@@ -17,7 +45,7 @@ export interface DialogState { present: boolean; selectedTab: string | null; bus
 export interface ComposerState {present:boolean;nonempty:boolean;attachments:boolean;ambiguous:boolean;}
 export interface PostActivityEvidence {present:boolean;targetUrl:string|null;targetCode:string|null;selectedTab:'likes'|'reposts'|'insights'|null;users:Profile[];displayedCount:number|null;counts:{likes:number|null;reposts:number|null;views:number|null};busy:boolean;warnings:string[];}
 export interface NotificationRowEvidence { text:string; actorLinks:Array<{username:string;url:string}>; postLinks:string[]; timeLabel?:string|null; timestamp?:string|null; eventId?:string|null; actionText?:string|null; additionalActorCount?:number|null; badge?:{kind:'like'|'reply'|'follow'|'unknown';signature:string|null}; }
-export interface PageRead { runtimeVersion: string; remoteMediaVersion?:number; runtimeRevision?:string;runtimeDiagnostics?:ReturnType<typeof runtimeDiagnostics>;extensionVersion?: string; url: string; title: string; posts: Post[]; profiles: Profile[]; replies: Post[]; dialogUsers: Profile[]; dialogState: DialogState; composerState?:ComposerState;postActivity?:PostActivityEvidence;notificationRows?:NotificationRowEvidence[]; visibilityState?: DocumentVisibilityState; viewer: { username: string | null }; text: string; warnings: string[]; observedAt: string; }
+export interface PageRead { runtimeVersion: string; remoteMediaVersion?:number; remoteNavigationToken?:string; runtimeRevision?:string;runtimeDiagnostics?:ReturnType<typeof runtimeDiagnostics>;extensionVersion?: string; url: string; title: string; posts: Post[]; profiles: Profile[]; replies: Post[]; dialogUsers: Profile[]; dialogState: DialogState; composerState?:ComposerState;postActivity?:PostActivityEvidence;notificationRows?:NotificationRowEvidence[]; visibilityState?: DocumentVisibilityState; viewer: { username: string | null }; text: string; warnings: string[]; observedAt: string; }
 let current: { id: string; url: string; expires: number; entries: Map<string,{element: HTMLElement; fingerprint: string}> } | undefined;
 function routeKey(value: string): string | null {
   try { const url=new URL(value);return `${url.origin}${url.pathname}${url.search}`; } catch { return null; }
@@ -571,5 +599,5 @@ export function readPage(): PageRead {
   const isProfileSearch=location.pathname==='/search'&&new URL(location.href).searchParams.get('filter')==='profiles';
   const profiles=new Map((documentMatches&&!isProfileSearch?parsed.profiles:[]).map(profile=>[profile.username.toLowerCase(),profile]));
   for(const profile of searchProfiles())if(!profiles.has(profile.username.toLowerCase()))profiles.set(profile.username.toLowerCase(),profile);
-  return {runtimeVersion,runtimeRevision,remoteMediaVersion:1,url:location.href,title:document.title,posts:merged,profiles:[...profiles.values()],replies,dialogUsers:dialogUsers(dialog),dialogState:readDialogState(dialog),composerState:readComposerState(),postActivity:postActivity(dialog),notificationRows:notificationRows(),visibilityState:document.visibilityState,viewer:viewer(),text:pageText,warnings,observedAt,runtimeDiagnostics:runtimeDiagnostics(dialog)};
+  return {runtimeVersion,runtimeRevision,remoteMediaVersion:1,remoteNavigationToken:remoteViewToken(),url:location.href,title:document.title,posts:merged,profiles:[...profiles.values()],replies,dialogUsers:dialogUsers(dialog),dialogState:readDialogState(dialog),composerState:readComposerState(),postActivity:postActivity(dialog),notificationRows:notificationRows(),visibilityState:document.visibilityState,viewer:viewer(),text:pageText,warnings,observedAt,runtimeDiagnostics:runtimeDiagnostics(dialog)};
 }

@@ -18,7 +18,7 @@ try{
   await driver.connect();
   if(!driver.status().connected)throw new Error('The selected tab is not connected.');
   const initial=await service.browserRead();
-  if(initial.runtimeVersion!=='0.6.0'||initial.extensionVersion!=='0.6.0')throw new Error(`Expected runtime and extension 0.6.0; received ${initial.runtimeVersion}/${initial.extensionVersion}`);
+  if(initial.runtimeVersion!=='0.7.0'||initial.extensionVersion!=='0.7.0')throw new Error(`Expected runtime and extension 0.7.0; received ${initial.runtimeVersion}/${initial.extensionVersion}`);
   if(!initial.viewer.username)throw new Error('Signed-in viewer was not observed.');
   if(process.env.THREADS_EXPECT_RUNTIME_REVISION&&initial.runtimeRevision!==process.env.THREADS_EXPECT_RUNTIME_REVISION)throw new Error(`Runtime revision mismatch: ${initial.runtimeRevision??'unreported'}`);
   report.checks.runtime={status:'PASS',version:initial.runtimeVersion,runtimeRevision:initial.runtimeRevision??null,extension:initial.extensionVersion};

@@ -23,19 +23,26 @@ var ThreadsMCP = (() => {
   __export(page_runtime_exports, {
     cancelDirectProfiles: () => cancelDirectProfiles,
     cancelMediaTransfers: () => cancelMediaTransfers,
+    cancelRemoteBrowserActions: () => cancelRemoteBrowserActions,
+    cancelRemoteViews: () => cancelRemoteViews,
     cancelSocialActions: () => cancelSocialActions,
     directProfile: () => directProfile2,
     interact: () => interact,
     media: () => media,
     openReadPanel: () => openReadPanel,
     readPage: () => readPage,
+    remoteBrowser: () => remoteBrowser,
+    remoteView: () => remoteView,
     runtimeRevision: () => runtimeRevision,
     runtimeVersion: () => runtimeVersion,
     scroll: () => scroll,
-    snapshot: () => snapshot,
+    snapshot: () => snapshot2,
     socialCommit: () => socialCommit,
+    socialCommitConfirmation: () => socialCommitConfirmation,
     socialInspect: () => socialInspect,
-    socialStage: () => socialStage
+    socialPrepareConfirmation: () => socialPrepareConfirmation,
+    socialStage: () => socialStage,
+    validateRemoteBrowserCommand: () => validateRemoteBrowserCommand
   });
 
   // src/urls.ts
@@ -250,7 +257,7 @@ var ThreadsMCP = (() => {
     const onNavigation = () => controller.abort(new DirectFailure("context_changed"));
     for (const type of ["pointerdown", "keydown", "touchstart"]) document.addEventListener(type, onManual, true);
     for (const type of ["pagehide", "beforeunload"]) globalThis.addEventListener(type, onNavigation);
-    const watch = setInterval(() => {
+    const watch2 = setInterval(() => {
       try {
         check2();
       } catch (error) {
@@ -455,7 +462,7 @@ var ThreadsMCP = (() => {
       result.warnings.push(`Direct profile pagination stopped: ${reason}. Results cover only accepted pages.`);
       return result;
     } finally {
-      clearInterval(watch);
+      clearInterval(watch2);
       clearTimeout(deadline);
       active.delete(controller);
       controller.abort();
@@ -694,12 +701,15 @@ var ThreadsMCP = (() => {
   // src/social-runtime.ts
   var socialKinds = ["like", "unlike", "save", "unsave", "repost", "unrepost", "follow", "unfollow", "publish", "reply", "quote", "delete"];
   var staged;
+  var confirmation;
   var generation2 = 0;
   var removeTakeoverWatch;
   var expiryTimer;
   function cancelSocialActions() {
+    staged?.deleteObserver?.disconnect();
     generation2++;
     staged = void 0;
+    confirmation = void 0;
     removeTakeoverWatch?.();
     removeTakeoverWatch = void 0;
     if (expiryTimer !== void 0) window.clearTimeout(expiryTimer);
@@ -809,7 +819,7 @@ var ThreadsMCP = (() => {
         if (reactions.length > 1) break;
       }
     }
-    const isolated = [...candidates].filter((candidate) => ![...candidates].some((other) => other !== candidate && candidate.contains(other)));
+    const isolated = [...candidates].filter((candidate2) => ![...candidates].some((other) => other !== candidate2 && candidate2.contains(other)));
     return only(isolated, "An isolated post card matching the exact permalink was not uniquely identified.", "AMBIGUOUS_UI_POST_SCOPE");
   }
   var matchers = {
@@ -857,7 +867,7 @@ var ThreadsMCP = (() => {
         }
       })) scopes.add(header);
     }
-    const isolated = [...scopes].filter((candidate) => ![...scopes].some((other) => other !== candidate && candidate.contains(other)));
+    const isolated = [...scopes].filter((candidate2) => ![...scopes].some((other) => other !== candidate2 && candidate2.contains(other)));
     return only(isolated, "A unique profile heading, exact username and matching profile tabs are required; suggested profiles and post rows are excluded.", "AMBIGUOUS_UI_PROFILE_SCOPE");
   }
   function precedes(first, second) {
@@ -879,9 +889,9 @@ var ThreadsMCP = (() => {
     const tab = profileTab(request, scope);
     return found.filter((el) => !el.closest('aside,nav,[role="complementary"],[role="navigation"],article,[data-pagelet*="timeline"]') && (!tab || precedes(el, tab)));
   }
-  function assertOwnPost(request, card, expectedAccount) {
+  function assertOwnPost(request, card, expectedAccount2) {
     const author = new URL(request.targetUrl).pathname.match(/^\/@([\w.]+)\/post\//)?.[1]?.toLowerCase();
-    const profile = `https://www.threads.com/@${expectedAccount}`;
+    const profile = `https://www.threads.com/@${expectedAccount2}`;
     const authorLinks = [...card.querySelectorAll("a[href]")].filter(isVisible).filter((link) => {
       try {
         return canonical(link.href) === profile;
@@ -889,7 +899,7 @@ var ThreadsMCP = (() => {
         return false;
       }
     });
-    if (author !== expectedAccount || !authorLinks.length) fail3("OWN_POST_REQUIRED", "Deletion requires the exact current-account post permalink and a visible matching author profile link in that post card.");
+    if (author !== expectedAccount2 || !authorLinks.length) fail3("OWN_POST_REQUIRED", "Deletion requires the exact current-account post permalink and a visible matching author profile link in that post card.");
   }
   function currentState(request, scope) {
     const buttons = actionControls(request, scope);
@@ -920,7 +930,7 @@ var ThreadsMCP = (() => {
     }
     return fail3(code, "The expected unique UI did not appear; inspect it before another preparation.");
   }
-  async function settledMenuTarget(request, pattern, expectedGeneration, expectedAccount) {
+  async function settledMenuTarget(request, pattern, expectedGeneration, expectedAccount2) {
     let previousCard;
     let previousOpener;
     let previousFingerprint = "";
@@ -930,11 +940,11 @@ var ThreadsMCP = (() => {
     try {
       while (Date.now() < deadline) {
         assertGeneration(expectedGeneration);
-        if (context(request).account !== expectedAccount) fail3("ACCOUNT_MISMATCH", "The account changed while waiting for the target post to settle.");
+        if (context(request).account !== expectedAccount2) fail3("ACCOUNT_MISMATCH", "The account changed while waiting for the target post to settle.");
         if (overlays().length) fail3("EXISTING_OVERLAY", "A menu or dialog appeared before the target post settled.");
         try {
           const card = postCard(request.targetUrl);
-          if (request.kind === "delete") assertOwnPost(request, card, expectedAccount);
+          if (request.kind === "delete") assertOwnPost(request, card, expectedAccount2);
           const opener = only(controls(card).filter((el) => pattern.test(name(el)) && /^(true|menu|dialog)$/.test(el.getAttribute("aria-haspopup") || "")), "An explicit, unique menu trigger is required for this action.", "AMBIGUOUS_UI_MENU_TRIGGER");
           const mark = fingerprint2(opener);
           if (card !== previousCard || opener !== previousOpener || mark !== previousFingerprint) {
@@ -968,29 +978,29 @@ var ThreadsMCP = (() => {
   }
   async function menuFor(request, expectedGeneration) {
     assertGeneration(expectedGeneration);
-    const expectedAccount = context(request).account;
+    const expectedAccount2 = context(request).account;
     if (overlays().length) fail3("EXISTING_OVERLAY", "Close the existing menu/dialog before staging another social action.");
     const pattern = ["repost", "unrepost", "quote"].includes(request.kind) ? /^(Repost|轉發)(?:\s*\d[\d.,]*(?:\s*[萬万億KMB])?)?$/i : /^(More|More options|更多|更多選項)$/i;
-    const { card, opener } = await settledMenuTarget(request, pattern, expectedGeneration, expectedAccount);
+    const { card, opener } = await settledMenuTarget(request, pattern, expectedGeneration, expectedAccount2);
     assertGeneration(expectedGeneration);
-    if (context(request).account !== expectedAccount) fail3("ACCOUNT_MISMATCH", "The account changed before opening its action menu.");
+    if (context(request).account !== expectedAccount2) fail3("ACCOUNT_MISMATCH", "The account changed before opening its action menu.");
     if (overlays().length) fail3("EXISTING_OVERLAY", "A menu or dialog appeared before the prepared menu click.");
     if (!card.isConnected || postCard(request.targetUrl) !== card) fail3("TARGET_CHANGED_MENU_CARD", "The settled exact post changed before its menu was opened.");
-    if (request.kind === "delete") assertOwnPost(request, card, expectedAccount);
+    if (request.kind === "delete") assertOwnPost(request, card, expectedAccount2);
     if (!isVisible(opener) || !card.contains(opener) || !pattern.test(name(opener))) fail3("TARGET_CHANGED_MENU_TRIGGER", "The settled menu trigger changed before it was opened.");
     opener.click();
     const menu = await waitFor(() => {
       assertGeneration(expectedGeneration);
-      if (context(request).account !== expectedAccount) fail3("ACCOUNT_MISMATCH", "The account changed while opening its action menu.");
+      if (context(request).account !== expectedAccount2) fail3("ACCOUNT_MISMATCH", "The account changed while opening its action menu.");
       if (!card.isConnected) fail3("TARGET_CHANGED_MENU_CARD", "The original post card was removed while opening its action menu.");
       if (!opener.isConnected || !card.contains(opener)) fail3("TARGET_CHANGED_MENU_TRIGGER", "The original menu trigger was removed from its post card.");
       const found = overlays();
       if (found.length !== 1) return;
-      const candidate = found[0];
+      const candidate2 = found[0];
       const controlledId = opener.getAttribute("aria-controls");
-      if (controlledId && !controlledId.split(/\s+/).includes(candidate.id)) return;
-      const ready = request.kind === "quote" ? controls(candidate).filter((el) => /^(Quote|Quote post|引用|引用貼文)$/i.test(name(el))).length === 1 : currentState(request, candidate) !== "unknown";
-      return ready ? candidate : void 0;
+      if (controlledId && !controlledId.split(/\s+/).includes(candidate2.id)) return;
+      const ready = request.kind === "quote" ? controls(candidate2).filter((el) => /^(Quote|Quote post|引用|引用貼文)$/i.test(name(el))).length === 1 : currentState(request, candidate2) !== "unknown";
+      return ready ? candidate2 : void 0;
     }, "AMBIGUOUS_UI_MENU_CONTENT");
     assertGeneration(expectedGeneration);
     context(request);
@@ -1048,10 +1058,10 @@ var ThreadsMCP = (() => {
   function textMatches(card, text2) {
     return [...card.querySelectorAll('p,[dir="auto"]')].filter(isVisible).some((el) => el.innerText.replace(/\r\n/g, "\n") === text2.replace(/\r\n/g, "\n"));
   }
-  async function openEmptyComposer(request, expectedGeneration, expectedAccount) {
+  async function openEmptyComposer(request, expectedGeneration, expectedAccount2) {
     const check2 = () => {
       assertGeneration(expectedGeneration);
-      if (context(request).account !== expectedAccount) fail3("ACCOUNT_MISMATCH", "The account changed while opening the composer.");
+      if (context(request).account !== expectedAccount2) fail3("ACCOUNT_MISMATCH", "The account changed while opening the composer.");
     };
     check2();
     if (overlays().length || editors(document).some((el) => editorValue(el).trim() || hasAttachments(el.parentElement, el))) fail3("EXISTING_DRAFT", "An existing draft or dialog is present; leave it intact and resolve it manually.");
@@ -1086,17 +1096,17 @@ var ThreadsMCP = (() => {
       if (!preview || !expectedReply) fail3("TARGET_UNVERIFIED", "The composer needs an exact target permalink or a reply preview matching the original post.");
       replyPreview = { element: preview, evidence: expectedReply };
     }
-    return { request: { kind: request.kind, targetUrl: request.targetUrl }, account: expectedAccount, scope, editor, targetScope, replyPreview };
+    return { request: { kind: request.kind, targetUrl: request.targetUrl }, account: expectedAccount2, scope, editor, targetScope, replyPreview };
   }
-  async function openMediaComposer(input, expectedAccount) {
+  async function openMediaComposer(input, expectedAccount2) {
     if (!input || !["publish", "reply", "quote"].includes(input.kind) || typeof input.targetUrl !== "string") fail3("INVALID_INPUT", "A fixed publish, reply or quote target is required.");
     const request = requestChecked(input, true);
-    if (context(request).account !== expectedAccount.toLowerCase()) fail3("ACCOUNT_MISMATCH", "The selected account does not match.");
+    if (context(request).account !== expectedAccount2.toLowerCase()) fail3("ACCOUNT_MISMATCH", "The selected account does not match.");
     cancelSocialActions();
     const expectedGeneration = generation2;
     watchManualTakeover2(expectedGeneration);
     try {
-      return await openEmptyComposer(request, expectedGeneration, expectedAccount.toLowerCase());
+      return await openEmptyComposer(request, expectedGeneration, expectedAccount2.toLowerCase());
     } finally {
       if (generation2 === expectedGeneration) cancelSocialActions();
     }
@@ -1209,13 +1219,13 @@ var ThreadsMCP = (() => {
       throw error;
     }
   }
-  function socialCommit(token, expectedAccount) {
+  function socialCommit(token, expectedAccount2) {
     const entry = staged;
     if (!entry || entry.token !== token || entry.consumed) fail3("INVALID_ACTION", "The browser preparation is absent or consumed.");
     entry.consumed = true;
     if (Date.now() > entry.expires) fail3("EXPIRED_ACTION", "Prepare from current UI again.");
     const ctx = context(entry.request);
-    if (ctx.account !== entry.account || expectedAccount.replace(/^@/, "").toLowerCase() !== entry.account) fail3("ACCOUNT_MISMATCH", "The signed-in account changed.");
+    if (ctx.account !== entry.account || expectedAccount2.replace(/^@/, "").toLowerCase() !== entry.account) fail3("ACCOUNT_MISMATCH", "The signed-in account changed.");
     if (!entry.scope?.isConnected || !isVisible(entry.scope)) fail3("TARGET_CHANGED", "The staged UI scope changed.");
     if (overlays().some((overlay) => overlay !== entry.scope)) fail3("UI_CHANGED", "Another dialog or menu opened after preparation.");
     if (entry.targetScope && !entry.editor) {
@@ -1238,9 +1248,93 @@ var ThreadsMCP = (() => {
       if (!entry.targetScope?.isConnected || !entry.replyPreview || matchingReplyPreview(entry.scope, entry.editor, entry.request.targetUrl, entry.replyPreview.evidence) !== entry.replyPreview.element)
         fail3("TARGET_CHANGED", "The composer target preview changed after preparation.");
     }
+    if (entry.request.kind === "delete") watchDeleteDialog(entry);
     entry.committedAt = Date.now();
     el.click();
+    entry.inspectDeleteMutations?.();
     return { dispatched: true, noop: false };
+  }
+  function confirmationDialogs() {
+    return [...document.querySelectorAll('[role="dialog"],[role="alertdialog"]')].filter(isVisible);
+  }
+  function watchDeleteDialog(entry) {
+    const expectedGeneration = generation2;
+    entry.deleteTargetFingerprint = fingerprint2(entry.targetScope);
+    const baseline = new Set(confirmationDialogs());
+    const inspect = (records) => {
+      if (generation2 !== expectedGeneration || staged !== entry) return;
+      for (const record of records) {
+        if (record.type === "childList" && [...record.removedNodes].some((node) => entry.deleteDialog && (node === entry.deleteDialog || node.contains(entry.deleteDialog)) || entry.targetScope && (node === entry.targetScope || node.contains(entry.targetScope)))) entry.deleteDialogInvalid = true;
+        if (entry.deleteDialog && record.type === "attributes" && record.target instanceof Element && record.target.contains(entry.deleteDialog) && ["style", "hidden", "aria-hidden", "inert"].includes(record.attributeName ?? "")) entry.deleteDialogInvalid = true;
+      }
+      const current2 = confirmationDialogs().filter((dialog) => !baseline.has(dialog));
+      if (current2.length > 1 || entry.deleteDialog && (current2.length !== 1 || current2[0] !== entry.deleteDialog)) entry.deleteDialogInvalid = true;
+      if (!entry.deleteDialog && current2.length === 1) entry.deleteDialog = current2[0];
+    };
+    entry.deleteObserver = new MutationObserver(inspect);
+    entry.deleteObserver.observe(document.documentElement, { childList: true, subtree: true, attributes: true });
+    entry.inspectDeleteMutations = () => inspect(entry.deleteObserver.takeRecords());
+  }
+  function boundDeleteDialog(entry) {
+    if (staged !== entry || entry.request.kind !== "delete" || !entry.consumed || !entry.committedAt || entry.noop)
+      fail3("INVALID_ACTION", "A consumed exact own-post Delete action is required.");
+    const ctx = context(entry.request);
+    if (ctx.account !== entry.account) fail3("ACCOUNT_MISMATCH", "The selected account changed.");
+    const target = postCard(entry.request.targetUrl);
+    if (target !== entry.targetScope || fingerprint2(target) !== entry.deleteTargetFingerprint) fail3("TARGET_CHANGED", "The original own-post card changed before confirmation.");
+    assertOwnPost(entry.request, target, entry.account);
+    entry.inspectDeleteMutations?.();
+    const dialog = entry.deleteDialog;
+    const current2 = confirmationDialogs();
+    if (entry.deleteDialogInvalid || !dialog || !isVisible(dialog) || current2.length !== 1 || current2[0] !== dialog || overlays().some((overlay) => overlay !== dialog))
+      fail3("CONFIRMATION_CHANGED", "The original unique delete confirmation dialog is unavailable or changed.");
+    const targetLinks = links(dialog);
+    if (targetLinks.some((link) => link.url !== entry.request.targetUrl)) fail3("TARGET_CHANGED", "The confirmation contains a different post target.");
+    const labels = [dialog.getAttribute("aria-label"), ...[...dialog.querySelectorAll('h1,h2,h3,[role="heading"]')].filter(isVisible).map((el) => el.innerText)].map(normalizedName);
+    if (!labels.some((label2) => /^(?:Delete(?: (?:post|thread))?|刪除(?:貼文|串文)?|删除(?:帖子|串文)?)[?？]?$/i.test(label2)))
+      fail3("CONFIRMATION_UNVERIFIED", "An explicit delete confirmation heading is required.");
+    const control = only(controls(dialog).filter((el) => /^(?:Delete(?: (?:post|thread))?|刪除|删除)$/i.test(name(el))), "A unique final Delete control is required.", "CONFIRMATION_UNVERIFIED");
+    only(controls(dialog).filter((el) => /^(?:Cancel|取消)$/i.test(name(el))), "A unique Cancel control is required.", "CONFIRMATION_UNVERIFIED");
+    if (control.matches(':disabled,[aria-disabled="true"]')) fail3("CONFIRMATION_UNVERIFIED", "The final Delete control is disabled.");
+    return { dialog, control };
+  }
+  function socialPrepareConfirmation(sourceToken, expectedAccount2) {
+    const source = staged;
+    if (!source || source.token !== sourceToken || source.confirmationPrepared) fail3("INVALID_ACTION", "The delete confirmation source is absent or consumed.");
+    source.confirmationPrepared = true;
+    if (Date.now() > source.expires) fail3("EXPIRED_ACTION", "Prepare the Delete action again.");
+    if (expectedAccount2.replace(/^@/, "").toLowerCase() !== source.account) fail3("ACCOUNT_MISMATCH", "Expected account differs from the delete source.");
+    const { dialog, control } = boundDeleteDialog(source);
+    const expires = Date.now() + 9e4;
+    const result = {
+      token: crypto.randomUUID(),
+      sourceToken,
+      account: source.account,
+      url: source.url,
+      targetUrl: source.request.targetUrl,
+      kind: "delete",
+      expiresAt: new Date(expires).toISOString()
+    };
+    confirmation = { ...result, source, dialog, control, dialogFingerprint: fingerprint2(dialog), controlFingerprint: fingerprint2(control), expires, consumed: false };
+    source.expires = expires;
+    if (expiryTimer !== void 0) window.clearTimeout(expiryTimer);
+    const expectedGeneration = generation2;
+    expiryTimer = window.setTimeout(() => {
+      if (generation2 === expectedGeneration) cancelSocialActions();
+    }, 9e4);
+    return result;
+  }
+  function socialCommitConfirmation(token, expectedAccount2) {
+    const entry = confirmation;
+    if (!entry || entry.token !== token || entry.consumed) fail3("INVALID_ACTION", "The final confirmation is absent or consumed.");
+    entry.consumed = true;
+    if (Date.now() > entry.expires) fail3("EXPIRED_ACTION", "Prepare the Delete action again.");
+    if (expectedAccount2.replace(/^@/, "").toLowerCase() !== entry.account) fail3("ACCOUNT_MISMATCH", "Expected account differs from final confirmation.");
+    const { dialog, control } = boundDeleteDialog(entry.source);
+    if (dialog !== entry.dialog || control !== entry.control || fingerprint2(dialog) !== entry.dialogFingerprint || fingerprint2(control) !== entry.controlFingerprint)
+      fail3("STALE_ELEMENT", "The exact confirmation dialog or Delete control changed.");
+    control.click();
+    return { dispatched: true, noop: false, verified: false, outcome: "outcome-uncertain", targetUrl: entry.targetUrl };
   }
   async function socialInspect(input, token) {
     const expectedGeneration = generation2;
@@ -1308,12 +1402,273 @@ var ThreadsMCP = (() => {
     return observation(request, scope);
   }
 
+  // src/remote-browser-runtime.ts
+  var snapshot;
+  var preparation;
+  var epoch = 0;
+  var watching = false;
+  var ttl = 6e4;
+  var warning = "Narrow read-navigation fallback only. No generic UI interaction, social controls, private text, messages or settings are exposed.";
+  function fail4(code) {
+    throw new Error(`${code}: Remote browser navigation could not be validated.`);
+  }
+  function validateRemoteBrowserCommand(input) {
+    const fields = {
+      snapshot: { required: ["expectedAccount"] },
+      scroll: { required: ["expectedAccount", "pixels"] },
+      prepare: { required: ["expectedAccount", "snapshotId", "ref", "verb", "purpose"], optional: ["value"] },
+      consume: { required: ["expectedAccount", "token"] },
+      invalidate: { required: [] }
+    };
+    const rule = typeof input.operation === "string" && Object.hasOwn(fields, input.operation) ? fields[input.operation] : void 0;
+    if (input.type !== "remote_browser" || !rule || rule.required.some((key) => !Object.hasOwn(input, key)) || Object.keys(input).some((key) => !["type", "operation", ...rule.required, ...rule.optional ?? []].includes(key))) fail4("INVALID_COMMAND");
+    if (input.operation !== "invalidate") expectedAccount(input.expectedAccount);
+    if (input.operation === "scroll" && (!Number.isInteger(input.pixels) || Number(input.pixels) === 0 || Math.abs(Number(input.pixels)) > 2e3)) fail4("INVALID_COMMAND");
+    if (input.operation === "consume" && (typeof input.token !== "string" || !/^[a-f0-9-]{36}$/i.test(input.token))) fail4("INVALID_COMMAND");
+    if (input.operation === "prepare") {
+      if (typeof input.snapshotId !== "string" || !/^[a-f0-9-]{36}$/i.test(input.snapshotId) || typeof input.ref !== "string" || !/^r\d{1,2}$/.test(input.ref) || !["click", "fill"].includes(String(input.verb)) || typeof input.purpose !== "string" || !input.purpose.trim() || input.purpose.length > 300 || /[\x00-\x1f\x7f]/.test(input.purpose)) fail4("INVALID_COMMAND");
+      if (input.verb === "click" ? input.value !== void 0 : typeof input.value !== "string" || !input.value.trim() || [...input.value].length > 200 || /[\x00-\x1f\x7f]/.test(input.value)) fail4("INVALID_COMMAND");
+    }
+    return { ...input };
+  }
+  function checkedRemoteBrowserUrl(value) {
+    if (typeof value !== "string" || value.length > 2e3) fail4("REMOTE_BROWSER_ROUTE_DENIED");
+    let url;
+    try {
+      url = new URL(value);
+    } catch {
+      return fail4("REMOTE_BROWSER_ROUTE_DENIED");
+    }
+    if (url.protocol !== "https:" || url.username || url.password || url.port || url.hash || !["threads.com", "www.threads.com", "threads.net", "www.threads.net"].includes(url.hostname)) fail4("REMOTE_BROWSER_ROUTE_DENIED");
+    url.hostname = "www.threads.com";
+    url.pathname = url.pathname.replace(/\/$/, "") || "/";
+    if (!/^(?:\/|\/(?:search|following|saved|liked)|\/@[A-Za-z0-9_.]{1,64}(?:\/(?:replies|media|reposts))?|\/(?:@[A-Za-z0-9_.]{1,64}\/)?post\/[A-Za-z0-9_-]{1,100})$/.test(url.pathname)) fail4("REMOTE_BROWSER_ROUTE_DENIED");
+    if (url.pathname !== "/search" && url.search) fail4("REMOTE_BROWSER_ROUTE_DENIED");
+    const keys = [...url.searchParams.keys()];
+    if (new Set(keys).size !== keys.length || keys.some((key) => !["q", "serp_type", "filter"].includes(key))) fail4("REMOTE_BROWSER_ROUTE_DENIED");
+    const query = url.searchParams.get("q");
+    if (query !== null && (!query.trim() || [...query].length > 200 || /[\x00-\x1f\x7f]/.test(query))) fail4("REMOTE_BROWSER_ROUTE_DENIED");
+    if (url.searchParams.has("serp_type") && url.searchParams.get("serp_type") !== "default") fail4("REMOTE_BROWSER_ROUTE_DENIED");
+    if (url.searchParams.has("filter") && !["recent", "profiles"].includes(url.searchParams.get("filter"))) fail4("REMOTE_BROWSER_ROUTE_DENIED");
+    url.searchParams.sort();
+    return url.href;
+  }
+  function remoteBrowserRouteName(value) {
+    const url = new URL(checkedRemoteBrowserUrl(value));
+    if (url.pathname === "/") return "Home";
+    if (url.pathname === "/search") return "Public search";
+    if (["/following", "/saved", "/liked"].includes(url.pathname)) return `${url.pathname.slice(1)} feed`;
+    return url.pathname.includes("/post/") || url.pathname.startsWith("/post/") ? `Post ${url.pathname}` : `Profile ${url.pathname}`;
+  }
+  function visible2(node) {
+    return node instanceof HTMLElement && node.isConnected && !!node.getClientRects().length && getComputedStyle(node).display !== "none" && getComputedStyle(node).visibility !== "hidden" && !node.closest('[aria-hidden="true"],[inert]');
+  }
+  function expectedAccount(value) {
+    if (typeof value !== "string" || !/^@?[A-Za-z0-9_.]{1,64}$/.test(value)) fail4("INVALID_INPUT");
+    return value.replace(/^@/, "").toLowerCase();
+  }
+  function currentAccount() {
+    const names = [...document.querySelectorAll("a[href]")].filter(visible2).flatMap((node) => {
+      const label2 = node.getAttribute("aria-label") || node.querySelector("svg")?.getAttribute("aria-label") || "";
+      if (!/^(Profile|個人檔案)$/i.test(label2.trim())) return [];
+      try {
+        const url = new URL(checkedRemoteBrowserUrl(new URL(node.getAttribute("href"), location.origin).href));
+        const match = /^\/@([A-Za-z0-9_.]{1,64})$/.exec(url.pathname);
+        return match ? [match[1].toLowerCase()] : [];
+      } catch {
+        return [];
+      }
+    });
+    if (new Set(names).size !== 1) fail4("ACCOUNT_UNVERIFIED");
+    return names[0];
+  }
+  function searchInput(node) {
+    if (!(node instanceof HTMLInputElement) || !visible2(node) || node.disabled || node.readOnly || !["search", "text"].includes(node.type) || !(node.type === "search" || node.getAttribute("role") === "searchbox") || !/^(Search|Search Threads|搜尋|搜尋串文)$/i.test((node.getAttribute("aria-label") || node.placeholder || "").trim())) return false;
+    if (node.form) {
+      if (node.form.method.toLowerCase() !== "get") return false;
+      try {
+        if (new URL(checkedRemoteBrowserUrl(new URL(node.form.getAttribute("action") || location.href, location.origin).href)).pathname !== "/search") return false;
+      } catch {
+        return false;
+      }
+    }
+    return true;
+  }
+  function assertSafe(account3) {
+    checkedRemoteBrowserUrl(location.href);
+    if (currentAccount() !== account3) fail4("ACCOUNT_MISMATCH");
+    if ([...document.querySelectorAll('[role="dialog"],[role="menu"],input[type="password"]')].some(visible2)) fail4("COMPOSER_BUSY");
+    if ([...document.querySelectorAll('textarea,[contenteditable="true"],input')].some((node) => {
+      if (node instanceof HTMLInputElement && node.type === "file") return !!node.files?.length;
+      if (!visible2(node)) return false;
+      if (searchInput(node)) return !!node.value.trim();
+      return node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement ? !!node.value.trim() : !!node.innerText.trim();
+    })) fail4("COMPOSER_BUSY");
+    if ([...document.querySelectorAll('[data-barcelona-composer-body="true"]')].some((node) => visible2(node) && !!node.querySelector('img,video,input[type="file"]'))) fail4("COMPOSER_BUSY");
+  }
+  function invalidate() {
+    snapshot = void 0;
+    preparation = void 0;
+  }
+  function cancelRemoteBrowserActions() {
+    epoch++;
+    invalidate();
+  }
+  function watch() {
+    if (watching) return;
+    watching = true;
+    const manual = (event) => {
+      if (event.isTrusted) {
+        epoch++;
+        invalidate();
+      }
+    };
+    for (const type of ["pointerdown", "mousedown", "touchstart", "keydown", "beforeinput", "input", "paste", "cut", "drop", "wheel"]) document.addEventListener(type, manual, true);
+    globalThis.addEventListener("pagehide", () => {
+      epoch++;
+      invalidate();
+    });
+  }
+  function candidate(node) {
+    if (!visible2(node) || node.closest('button,[role="button"],[role="menu"],[role="dialog"],[contenteditable="true"]')) return;
+    if ([...node.attributes].some((attribute) => /^on/i.test(attribute.name)) || node.hasAttribute("aria-haspopup") || node.getAttribute("aria-disabled") === "true") return;
+    if (node instanceof HTMLAnchorElement) {
+      if (node.hasAttribute("download") || node.hasAttribute("ping") || node.getAttribute("role") && node.getAttribute("role") !== "link") return;
+      const label2 = (node.getAttribute("aria-label") || node.textContent || "").trim();
+      if (/^(?:like|unlike|follow|unfollow|delete|publish|reply|quote|repost|save|unsave|messages?|activity|notifications?|settings|password|log\s?in|log\s?out|sign\s?in|sign\s?out|刪除|發佈|發布|回覆|引用|轉發|追蹤|取消追蹤|讚|收回讚|訊息|通知|設定|密碼|登入|登出)(?:\s|$)/i.test(label2)) return;
+      const href = node.getAttribute("href");
+      if (!href || href.startsWith("#") || href.includes("\\")) return;
+      let url;
+      try {
+        url = checkedRemoteBrowserUrl(new URL(href, location.origin).href);
+      } catch {
+        return;
+      }
+      const descriptor = { kind: "navigation", name: remoteBrowserRouteName(url), verb: "click", url };
+      return { node, descriptor, fingerprint: JSON.stringify([node.getAttribute("href"), node.getAttribute("role"), node.getAttribute("aria-label"), descriptor]) };
+    }
+    if (searchInput(node) && !node.value.trim()) {
+      const descriptor = { kind: "search", name: "Public search query", verb: "fill" };
+      return { node, descriptor, fingerprint: JSON.stringify([node.type, node.getAttribute("role"), node.getAttribute("aria-label"), node.placeholder, node.value, node.form?.getAttribute("action")]) };
+    }
+  }
+  function makeSnapshot(account3) {
+    assertSafe(account3);
+    watch();
+    invalidate();
+    const binding = { id: crypto.randomUUID(), account: account3, route: location.href, epoch, expires: Date.now() + ttl, entries: /* @__PURE__ */ new Map() };
+    const elements = [];
+    for (const node of document.querySelectorAll("a[href],input")) {
+      if (elements.length >= 80) break;
+      const value = candidate(node);
+      if (!value) continue;
+      const ref = `r${elements.length + 1}`;
+      binding.entries.set(ref, value);
+      elements.push({ ref, ...value.descriptor });
+    }
+    snapshot = binding;
+    return { snapshotId: binding.id, account: account3, url: checkedRemoteBrowserUrl(binding.route), observedAt: (/* @__PURE__ */ new Date()).toISOString(), expiresAt: new Date(binding.expires).toISOString(), elements, scope: "public-read-navigation", warnings: [warning] };
+  }
+  function assertBinding(binding, account3) {
+    assertSafe(account3);
+    if (Date.now() >= binding.expires || binding.epoch !== epoch || binding.route !== location.href || binding.account !== account3) fail4("REMOTE_BROWSER_STALE");
+  }
+  function remoteBrowser(command) {
+    validateRemoteBrowserCommand({ type: "remote_browser", ...command });
+    if (command.operation === "invalidate") {
+      cancelRemoteBrowserActions();
+      return { invalidated: true };
+    }
+    const account3 = expectedAccount(command.expectedAccount);
+    if (command.operation === "snapshot") return makeSnapshot(account3);
+    if (command.operation === "scroll") {
+      assertSafe(account3);
+      if (!Number.isInteger(command.pixels) || Number(command.pixels) === 0 || Math.abs(Number(command.pixels)) > 2e3) fail4("INVALID_INPUT");
+      invalidate();
+      globalThis.scrollBy({ top: Number(command.pixels), behavior: "instant" });
+      return makeSnapshot(account3);
+    }
+    if (command.operation === "prepare") {
+      const binding = snapshot;
+      if (!binding || binding.id !== command.snapshotId || typeof command.ref !== "string") fail4("REMOTE_BROWSER_STALE");
+      assertBinding(binding, account3);
+      if (typeof command.purpose !== "string" || !command.purpose.trim() || command.purpose.length > 300 || /[\x00-\x1f\x7f]/.test(command.purpose)) fail4("INVALID_INPUT");
+      const original = binding.entries.get(command.ref), fresh = original && candidate(original.node);
+      if (!original || !fresh || original.fingerprint !== fresh.fingerprint || command.verb !== fresh.descriptor.verb) fail4("REMOTE_BROWSER_REF_DENIED");
+      let destination;
+      if (fresh.descriptor.kind === "navigation") {
+        if (command.value !== void 0) fail4("INVALID_INPUT");
+        destination = fresh.descriptor.url;
+      } else {
+        if (typeof command.value !== "string" || !command.value.trim() || [...command.value].length > 200 || /[\x00-\x1f\x7f]/.test(command.value)) fail4("INVALID_INPUT");
+        destination = checkedRemoteBrowserUrl(`https://www.threads.com/search?q=${encodeURIComponent(command.value)}&serp_type=default`);
+      }
+      const token = crypto.randomUUID();
+      preparation = { token, binding, candidate: original, destination };
+      return { token, account: account3, sourceUrl: checkedRemoteBrowserUrl(binding.route), destination, expiresAt: new Date(binding.expires).toISOString(), kind: fresh.descriptor.kind };
+    }
+    if (command.operation === "consume") {
+      const current2 = preparation;
+      preparation = void 0;
+      snapshot = void 0;
+      if (!current2 || current2.token !== command.token) fail4("REMOTE_BROWSER_PREPARATION_MISSING");
+      assertBinding(current2.binding, account3);
+      const fresh = candidate(current2.candidate.node);
+      if (!fresh || fresh.fingerprint !== current2.candidate.fingerprint) fail4("REMOTE_BROWSER_STALE");
+      const result = {
+        account: account3,
+        sourceUrl: checkedRemoteBrowserUrl(current2.binding.route),
+        destination: current2.destination,
+        kind: current2.candidate.descriptor.kind,
+        dispatched: true,
+        verified: false
+      };
+      location.assign(current2.destination);
+      return result;
+    }
+    fail4("INVALID_COMMAND");
+  }
+
   // src/page-runtime.ts
   function directProfile2(args) {
     return directProfile(args, { viewer: () => viewer().username, guard: guard2 });
   }
-  var runtimeVersion = "0.6.0";
-  var runtimeRevision = "20261106-remote-media-1";
+  var runtimeVersion = "0.7.0";
+  var runtimeRevision = "20261106-remote-parity-1";
+  var remoteViewEpoch = 0;
+  var remoteViewWatching = false;
+  var remoteViewBinding;
+  function cancelRemoteViews() {
+    remoteViewEpoch++;
+    remoteViewBinding = void 0;
+  }
+  function remoteViewToken() {
+    if (!remoteViewWatching) {
+      remoteViewWatching = true;
+      for (const type of ["pointerdown", "mousedown", "touchstart", "keydown", "beforeinput", "input", "paste", "cut", "drop", "wheel"]) document.addEventListener(type, (event) => {
+        if (event.isTrusted) cancelRemoteViews();
+      }, true);
+      globalThis.addEventListener("pagehide", cancelRemoteViews);
+    }
+    const token = crypto.randomUUID();
+    remoteViewBinding = { token, route: location.href, account: viewer().username, epoch: remoteViewEpoch, expires: Date.now() + 3e4 };
+    return token;
+  }
+  function remoteView(command) {
+    const routes = { for_you: "/", following: "/following/", saved: "/saved/", liked: "/liked/", notifications: "/activity", messages: "/messages/" };
+    if (command.type !== "remote_view" || Object.keys(command).some((key) => !["type", "kind", "expectedAccount", "navigationToken"].includes(key)) || typeof command.kind !== "string" || !Object.hasOwn(routes, command.kind) || typeof command.expectedAccount !== "string" || !/^@?[A-Za-z0-9_.]{1,30}$/.test(command.expectedAccount)) throw new Error("INVALID_COMMAND: Invalid remote view.");
+    guard2();
+    const expected = command.expectedAccount.replace(/^@/, "").toLowerCase();
+    const binding = remoteViewBinding;
+    remoteViewBinding = void 0;
+    if (!binding || binding.token !== command.navigationToken || binding.route !== location.href || binding.epoch !== remoteViewEpoch || binding.expires < Date.now() || binding.account !== expected) throw new Error("REMOTE_VIEW_STALE: The read-view binding changed.");
+    if (viewer().username?.toLowerCase() !== expected) throw new Error("ACCOUNT_MISMATCH: Remote view account changed.");
+    const composer2 = readComposerState();
+    if (composer2.present || composer2.nonempty || composer2.attachments || composer2.ambiguous) throw new Error("COMPOSER_BUSY: Preserve the current composer.");
+    const destination = "https://www.threads.com" + routes[command.kind];
+    location.assign(destination);
+    return { dispatched: true, verified: false, destination };
+  }
   var current;
   function routeKey(value) {
     try {
@@ -1329,11 +1684,11 @@ var ThreadsMCP = (() => {
   function rendered(el) {
     return el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden" && getComputedStyle(el).display !== "none";
   }
-  function visible2(el) {
+  function visible3(el) {
     return el instanceof HTMLElement && rendered(el) && !el.closest('[aria-hidden="true"],[inert]');
   }
   function visibleDialog() {
-    return [...document.querySelectorAll('[role="dialog"]')].filter((el) => visible2(el) && !el.closest('[aria-hidden="true"]')).at(-1);
+    return [...document.querySelectorAll('[role="dialog"]')].filter((el) => visible3(el) && !el.closest('[aria-hidden="true"]')).at(-1);
   }
   var connectionTabPattern = /^(?:Followers|Following|粉絲|追蹤者|追蹤中)(?:\s*[(（]?[\d,.]+(?:[kmb萬億千])?[)）]?)?$/i;
   var connectionSession;
@@ -1342,14 +1697,14 @@ var ThreadsMCP = (() => {
     connectionSession = void 0;
   }
   function selectedDialogTab(dialog) {
-    const tabs = [...dialog.querySelectorAll('[role="tab"][aria-selected="true"]')].filter(visible2);
+    const tabs = [...dialog.querySelectorAll('[role="tab"][aria-selected="true"]')].filter(visible3);
     return tabs.length === 1 ? label(tabs[0]).replace(/\s+/g, " ").trim() || null : null;
   }
   function connectionTabIdentity(tab) {
     return tab && connectionTabPattern.test(tab) ? /^(?:Following|追蹤中)/i.test(tab) ? "following" : "followers" : null;
   }
   function connectionRows(dialog) {
-    return [...dialog.querySelectorAll("a[href]")].filter((a) => visible2(a) && a.protocol === "https:" && ["www.threads.com", "threads.com", "www.threads.net", "threads.net"].includes(a.hostname) && !a.port && !a.username && !a.password && /^\/@[\w.]+\/?$/.test(a.pathname) && !a.closest('[role="tablist"]')).map((node) => ({ node, href: node.href }));
+    return [...dialog.querySelectorAll("a[href]")].filter((a) => visible3(a) && a.protocol === "https:" && ["www.threads.com", "threads.com", "www.threads.net", "threads.net"].includes(a.hostname) && !a.port && !a.username && !a.password && /^\/@[\w.]+\/?$/.test(a.pathname) && !a.closest('[role="tablist"]')).map((node) => ({ node, href: node.href }));
   }
   function sameConnectionRows(a, b) {
     return a.length === b.length && a.every((row, index) => row.node === b[index]?.node && row.href === b[index]?.href);
@@ -1374,7 +1729,7 @@ var ThreadsMCP = (() => {
   function updateConnectionSession(session, records) {
     if (connectionSession !== session) return;
     const closed = records.some((record) => record.type === "childList" && [...record.removedNodes].some((node) => node === session.dialog || node.contains(session.dialog)) || record.type === "attributes" && (record.target === session.dialog || record.target.contains(session.dialog)) && (record.attributeName === "aria-hidden" && record.oldValue === "true" || ["hidden", "inert"].includes(record.attributeName || "") && record.oldValue !== null || record.attributeName === "style" && /(?:display\s*:\s*none|visibility\s*:\s*hidden)/i.test(record.oldValue || "")));
-    if (closed || !session.dialog.isConnected || !visible2(session.dialog) || routeKey(location.href) !== session.route) {
+    if (closed || !session.dialog.isConnected || !visible3(session.dialog) || routeKey(location.href) !== session.route) {
       clearConnectionSession();
       return;
     }
@@ -1437,7 +1792,7 @@ var ThreadsMCP = (() => {
   }
   var activityDiagnostic;
   function busyIndicators(scope) {
-    const profiles = [...scope.querySelectorAll("a[href]")].filter((link) => visible2(link) && /^\/@[\w.]+\/?$/.test(link.pathname));
+    const profiles = [...scope.querySelectorAll("a[href]")].filter((link) => visible3(link) && /^\/@[\w.]+\/?$/.test(link.pathname));
     const indicators = loadingIndicators(scope), tab = selectedDialogTab(scope), rows = connectionRows(scope);
     return { total: indicators.length, profileLinks: profiles.length, transitionPending: connectionSession?.dialog === scope && !!connectionSession.pending, indicators: indicators.slice(0, 8).map((el) => {
       const rect = el.getBoundingClientRect();
@@ -1466,7 +1821,7 @@ var ThreadsMCP = (() => {
       from: pending?.from ?? null,
       to: pending?.target ?? null,
       oldRowCount: pending?.baseline.length ?? 0,
-      stillConnectedOldRowCount: pending?.baseline.filter((row) => row.node.isConnected && visible2(row.node) && row.node.href === row.href).length ?? 0,
+      stillConnectedOldRowCount: pending?.baseline.filter((row) => row.node.isConnected && visible3(row.node) && row.node.href === row.href).length ?? 0,
       currentRowCount: connection?.rows.length ?? 0,
       sawBlockingLoad: pending?.blockingObserved ?? false
     } } : null, activity: activity ? {
@@ -1506,7 +1861,7 @@ var ThreadsMCP = (() => {
   function nearbyEditorState(el) {
     let scope = el.parentElement;
     for (let depth = 0; scope && scope !== document.body && depth < 6; depth++, scope = scope.parentElement) {
-      const editors2 = [...scope.querySelectorAll('textarea,[contenteditable="true"]')].filter(visible2);
+      const editors2 = [...scope.querySelectorAll('textarea,[contenteditable="true"]')].filter(visible3);
       if (editors2.length) return editors2.map((editor) => editor instanceof HTMLTextAreaElement ? editor.value : editor.innerHTML);
       if (scope.matches('main,[role="main"]')) break;
     }
@@ -1527,16 +1882,16 @@ var ThreadsMCP = (() => {
     }
   }
   function viewer() {
-    const names = [...document.querySelectorAll("a[href]")].filter(visible2).filter((a) => /^(Profile|個人檔案)$/i.test(label(a)) && !a.closest('article,[role="dialog"],[role="menu"]') && a.protocol === "https:" && ["www.threads.com", "threads.com", "www.threads.net", "threads.net"].includes(a.hostname) && !a.username && !a.password && !a.port).map((a) => a.pathname.match(/^\/@([\w.]+)\/?$/)?.[1]?.toLowerCase()).filter((value) => !!value);
+    const names = [...document.querySelectorAll("a[href]")].filter(visible3).filter((a) => /^(Profile|個人檔案)$/i.test(label(a)) && !a.closest('article,[role="dialog"],[role="menu"]') && a.protocol === "https:" && ["www.threads.com", "threads.com", "www.threads.net", "threads.net"].includes(a.hostname) && !a.username && !a.password && !a.port).map((a) => a.pathname.match(/^\/@([\w.]+)\/?$/)?.[1]?.toLowerCase()).filter((value) => !!value);
     const unique = [...new Set(names)];
     return { username: unique.length === 1 ? unique[0] : null };
   }
   function interactive(scope = document) {
-    return [...scope.querySelectorAll('a[href],button,input:not([type="hidden"]),textarea,select,[role="button"],[role="tab"],[role="menuitem"],[contenteditable="true"]')].filter(visible2);
+    return [...scope.querySelectorAll('a[href],button,input:not([type="hidden"]),textarea,select,[role="button"],[role="tab"],[role="menuitem"],[contenteditable="true"]')].filter(visible3);
   }
   function readComposerState() {
     const state = { present: false, nonempty: false, attachments: false, ambiguous: false };
-    const editors2 = [...document.querySelectorAll('textarea,[contenteditable="true"],input:not([type]),input[type="text"],input[type="search"]')].filter(visible2);
+    const editors2 = [...document.querySelectorAll('textarea,[contenteditable="true"],input:not([type]),input[type="text"],input[type="search"]')].filter(visible3);
     const removeMedia = (el) => /^(?:Remove|Delete|移除|刪除)(?:\s*(?:media|image|photo|video|attachment|圖片|相片|影片|附件))/i.test(label(el));
     for (const editor of editors2) {
       const name2 = [editor.getAttribute("aria-label"), editor.getAttribute("placeholder"), editor.getAttribute("aria-placeholder")].filter(Boolean).join(" ");
@@ -1558,7 +1913,7 @@ var ThreadsMCP = (() => {
         }
       }
       const files = scope ? [...scope.querySelectorAll('input[type="file"]')].some((input) => !!input.files?.length) : false;
-      const previews = scope ? [...scope.querySelectorAll("img,video")].filter(visible2).some((el) => /^(?:blob:|data:image\/)/i.test(el.getAttribute("src") || "") || !!body && (el.tagName === "VIDEO" || !/(?:profile picture|profile photo|大頭貼|頭像)/i.test(el.getAttribute("alt") || ""))) : false;
+      const previews = scope ? [...scope.querySelectorAll("img,video")].filter(visible3).some((el) => /^(?:blob:|data:image\/)/i.test(el.getAttribute("src") || "") || !!body && (el.tagName === "VIDEO" || !/(?:profile picture|profile photo|大頭貼|頭像)/i.test(el.getAttribute("alt") || ""))) : false;
       const attachments = files || previews || !!scope && interactive(scope).some(removeMedia);
       state.nonempty ||= nonempty;
       state.attachments ||= attachments;
@@ -1566,7 +1921,7 @@ var ThreadsMCP = (() => {
     }
     return state;
   }
-  function snapshot() {
+  function snapshot2() {
     guard2();
     current = { id: crypto.randomUUID(), url: location.href, expires: Date.now() + 12e4, entries: /* @__PURE__ */ new Map() };
     const elements = interactive().slice(0, 300).map((element, i) => {
@@ -1580,7 +1935,7 @@ var ThreadsMCP = (() => {
     guard2();
     if (!current || current.id !== args.snapshotId || current.url !== location.href || Date.now() > current.expires) throw new Error("STALE_SNAPSHOT: Get a new browser snapshot before acting.");
     const entry = current.entries.get(args.ref);
-    if (!entry || !entry.element.isConnected || !visible2(entry.element) || entry.fingerprint !== fingerprint3(entry.element)) throw new Error("STALE_ELEMENT: The target changed. Get a new snapshot.");
+    if (!entry || !entry.element.isConnected || !visible3(entry.element) || entry.fingerprint !== fingerprint3(entry.element)) throw new Error("STALE_ELEMENT: The target changed. Get a new snapshot.");
     const el = entry.element;
     if (el.matches(':disabled,[aria-disabled="true"]')) throw new Error("DISABLED_ELEMENT: The target is disabled.");
     current = void 0;
@@ -1617,7 +1972,7 @@ var ThreadsMCP = (() => {
   function scrollTarget() {
     const dialog = visibleDialog();
     const scope = dialog || document;
-    const options = [...scope.querySelectorAll("div,section,main")].filter((el) => visible2(el) && el.scrollHeight > el.clientHeight + 80 && /(auto|scroll)/.test(getComputedStyle(el).overflowY));
+    const options = [...scope.querySelectorAll("div,section,main")].filter((el) => visible3(el) && el.scrollHeight > el.clientHeight + 80 && /(auto|scroll)/.test(getComputedStyle(el).overflowY));
     options.sort((a, b) => b.clientHeight - a.clientHeight);
     return options[0] || document.scrollingElement || document.documentElement;
   }
@@ -1654,7 +2009,7 @@ var ThreadsMCP = (() => {
   function checkActivitySession(records = []) {
     const binding = activityBinding;
     if (!binding) return;
-    if (!binding.dialog.isConnected || !visible2(binding.dialog) || currentPostTarget()?.url !== binding.url) {
+    if (!binding.dialog.isConnected || !visible3(binding.dialog) || currentPostTarget()?.url !== binding.url) {
       clearActivityBinding();
       return;
     }
@@ -1696,7 +2051,7 @@ var ThreadsMCP = (() => {
       clearActivityBinding();
       return void 0;
     }
-    const headings = [...dialog.querySelectorAll('h1,h2,[role="heading"]')].filter(visible2).map((el) => el.innerText.trim());
+    const headings = [...dialog.querySelectorAll('h1,h2,[role="heading"]')].filter(visible3).map((el) => el.innerText.trim());
     const title = headings.find((text2) => /^(?:貼文動態|Post activity|Activity|[\d,.萬万KMB]+\s*個讚|[\d,.萬万KMB]+\s*次轉發|[\d,.KMB]+\s+(?:likes?|reposts?)|Likes|Reposts)$/i.test(text2));
     if (!title) return void 0;
     const selectedTab = /個讚$|\blikes?$/i.test(title) ? "likes" : /次轉發$|\breposts?$/i.test(title) ? "reposts" : null;
@@ -1715,9 +2070,9 @@ var ThreadsMCP = (() => {
     };
     const counts = { likes: selectedTab === "likes" ? parseCount(title) : countFor(/^(?:按讚內容|Likes)[\d,.萬万KMB]*$/i), reposts: selectedTab === "reposts" ? parseCount(title) : countFor(/^(?:轉發|Reposts?)[\d,.萬万KMB]*$/i), views: countFor(/^(?:洞察報告|Insights)[\d,.萬万KMB]+(?:次瀏覽|views)?$/i) };
     const users = /* @__PURE__ */ new Map();
-    if (bound && selectedTab && !busy) for (const row of [...dialog.querySelectorAll('[data-pressable-container="true"],[role="listitem"]')].filter(visible2)) {
+    if (bound && selectedTab && !busy) for (const row of [...dialog.querySelectorAll('[data-pressable-container="true"],[role="listitem"]')].filter(visible3)) {
       if (![...row.querySelectorAll("time")].some((time) => rendered(time) && !time.closest('[aria-hidden="true"],[inert]'))) continue;
-      const names = [...new Set([...row.querySelectorAll("a[href]")].filter(visible2).filter((a) => a.protocol === "https:" && ["www.threads.com", "threads.com", "threads.net", "www.threads.net"].includes(a.hostname) && !a.username && !a.password && !a.port).flatMap((a) => {
+      const names = [...new Set([...row.querySelectorAll("a[href]")].filter(visible3).filter((a) => a.protocol === "https:" && ["www.threads.com", "threads.com", "threads.net", "www.threads.net"].includes(a.hostname) && !a.username && !a.password && !a.port).flatMap((a) => {
         const match = a.pathname.match(/^\/@([\w.]+)\/?$/);
         return match ? [match[1].toLowerCase()] : [];
       }))];
@@ -1784,7 +2139,7 @@ var ThreadsMCP = (() => {
       const ready = await waitActivity("readiness", () => {
         if (currentPostTarget()?.url !== target.url) throw new Error("CONTEXT_CHANGED: The post changed before activity was ready.");
         const candidates = /* @__PURE__ */ new Set();
-        const links2 = [...document.querySelectorAll("a[href]")].filter(visible2).filter((a) => /^\/@[\w.]+\/post\/[\w-]+\/?$/.test(a.pathname));
+        const links2 = [...document.querySelectorAll("a[href]")].filter(visible3).filter((a) => /^\/@[\w.]+\/post\/[\w-]+\/?$/.test(a.pathname));
         for (const link of links2.filter((a) => a.pathname.replace(/\/$/, "") === new URL(target.url).pathname)) {
           let node = link;
           for (let depth = 0; node && node !== document.body && depth < 16; depth++, node = node.parentElement) {
@@ -1796,7 +2151,7 @@ var ThreadsMCP = (() => {
             }
           }
         }
-        const isolated = [...candidates].filter((candidate) => ![...candidates].some((other) => other !== candidate && candidate.contains(other)));
+        const isolated = [...candidates].filter((candidate2) => ![...candidates].some((other) => other !== candidate2 && candidate2.contains(other)));
         if (isolated.length !== 1) return void 0;
         const card2 = isolated[0];
         let readyRegion = card2;
@@ -1833,19 +2188,19 @@ var ThreadsMCP = (() => {
       const card = ready.card;
       let options = ready.options;
       if (options.length !== 1) {
-        if ([...document.querySelectorAll('[role="menu"]')].some(visible2)) throw new Error("EXISTING_OVERLAY: Close the existing menu before opening post activity.");
+        if ([...document.querySelectorAll('[role="menu"]')].some(visible3)) throw new Error("EXISTING_OVERLAY: Close the existing menu before opening post activity.");
         const more = interactive(card).filter((el) => /^(?:More|More options|更多|更多選項)$/i.test(label(el)) && /^(?:menu|true)$/.test(el.getAttribute("aria-haspopup") || ""));
         if (more.length !== 1) throw new Error("UI_CHANGED: A unique exact-post More menu is required to open activity.");
         activityDiagnostic.stage = "menu";
         activityDiagnostic.dispatches++;
         more[0].click();
         options = await waitActivity("menu", () => {
-          const menus = [...document.querySelectorAll('[role="menu"],[role="dialog"]')].filter(visible2);
+          const menus = [...document.querySelectorAll('[role="menu"],[role="dialog"]')].filter(visible3);
           const found = menus.flatMap((menu) => interactive(menu).filter((el) => /^(?:View activity|Post activity|查看動態|貼文動態)$/i.test(label(el))));
           return found.length === 1 ? found : void 0;
         });
       }
-      if (currentPostTarget()?.url !== target.url || !options[0].isConnected || !visible2(options[0])) throw new Error("CONTEXT_CHANGED: The post or activity control changed before activity opened.");
+      if (currentPostTarget()?.url !== target.url || !options[0].isConnected || !visible3(options[0])) throw new Error("CONTEXT_CHANGED: The post or activity control changed before activity opened.");
       clearActivityBinding();
       activityDiagnostic.stage = "overview";
       activityDiagnostic.control = options[0];
@@ -1890,7 +2245,7 @@ var ThreadsMCP = (() => {
   function domPosts(observedAt) {
     const results = [];
     const reaction = /^(Like|Unlike|讚|收回讚)(?:\s*\d[\d.,]*(?:\s*[萬万億亿KMB])?)?$/i;
-    const links2 = [...document.querySelectorAll('a[href*="/post/"]')].filter((link) => visible2(link) && link.protocol === "https:" && ["www.threads.com", "threads.com", "www.threads.net", "threads.net"].includes(link.hostname) && !link.username && !link.password && !link.port).flatMap((link) => {
+    const links2 = [...document.querySelectorAll('a[href*="/post/"]')].filter((link) => visible3(link) && link.protocol === "https:" && ["www.threads.com", "threads.com", "www.threads.net", "threads.net"].includes(link.hostname) && !link.username && !link.password && !link.port).flatMap((link) => {
       const match = link.pathname.match(/^\/@([\w.]+)\/post\/([\w-]+)\/?$/);
       return match ? [{ link, username: match[1], code: match[2] }] : [];
     });
@@ -1899,18 +2254,18 @@ var ThreadsMCP = (() => {
     for (const [code, entries] of byCode) {
       const candidates = /* @__PURE__ */ new Set();
       for (const { link } of entries) {
-        let candidate = link;
-        for (let depth = 0; candidate && depth < 14; depth++, candidate = candidate.parentElement) {
-          if (candidate === document.body || candidate.matches('main,[role="main"]')) break;
-          const controls2 = interactive(candidate).filter((el) => el.matches('button,[role="button"]') && reaction.test(label(el)));
+        let candidate2 = link;
+        for (let depth = 0; candidate2 && depth < 14; depth++, candidate2 = candidate2.parentElement) {
+          if (candidate2 === document.body || candidate2.matches('main,[role="main"]')) break;
+          const controls2 = interactive(candidate2).filter((el) => el.matches('button,[role="button"]') && reaction.test(label(el)));
           if (controls2.length > 1) break;
-          if (controls2.length === 1 && !links2.some((other) => other.code !== code && candidate.contains(other.link))) {
-            candidates.add(candidate);
+          if (controls2.length === 1 && !links2.some((other) => other.code !== code && candidate2.contains(other.link))) {
+            candidates.add(candidate2);
             break;
           }
         }
       }
-      const isolated = [...candidates].filter((candidate) => ![...candidates].some((other) => other !== candidate && candidate.contains(other)));
+      const isolated = [...candidates].filter((candidate2) => ![...candidates].some((other) => other !== candidate2 && candidate2.contains(other)));
       if (isolated.length !== 1) continue;
       const card = isolated[0];
       const identity = entries.find((entry) => card.contains(entry.link));
@@ -1925,7 +2280,7 @@ var ThreadsMCP = (() => {
       let node;
       while (node = walker.nextNode()) {
         const parent = node.parentElement;
-        if (!parent || parent.closest('a,button,[role="button"],time,svg,script,style') || !visible2(parent)) continue;
+        if (!parent || parent.closest('a,button,[role="button"],time,svg,script,style') || !visible3(parent)) continue;
         const value = node.textContent?.trim();
         if (value) textParts.push(value);
       }
@@ -1941,7 +2296,7 @@ var ThreadsMCP = (() => {
     const map = /* @__PURE__ */ new Map();
     for (const link of dialog.querySelectorAll('a[href^="/@"]')) {
       const username = link.pathname.match(/^\/@([\w.]+)\/?$/)?.[1];
-      if (!username || map.has(username) || !visible2(link) || link.closest('[aria-hidden="true"]')) continue;
+      if (!username || map.has(username) || !visible3(link) || link.closest('[aria-hidden="true"]')) continue;
       map.set(username, { username, bio: null, followers: null, following: null, private: null, url: `https://www.threads.com/@${username}`, links: [] });
     }
     return [...map.values()];
@@ -1960,34 +2315,34 @@ var ThreadsMCP = (() => {
     const rows = /* @__PURE__ */ new Set();
     for (const time of document.querySelectorAll("time")) {
       if (!rendered(time) || time.closest('nav,[role="navigation"],[aria-hidden="true"]')) continue;
-      let candidate = time.parentElement;
+      let candidate2 = time.parentElement;
       let selected = null;
-      for (let depth = 0; candidate && depth < 12; depth++, candidate = candidate.parentElement) {
-        if (candidate === document.body || candidate.matches('main,aside,[role="main"],[role="complementary"]') || candidate.querySelectorAll("time").length !== 1) break;
-        if (candidate.querySelector('nav,aside,[role="navigation"],[role="complementary"]')) break;
-        const profiles = [...candidate.querySelectorAll("a[href]")].filter((a) => /^\/@[\w.]+\/?$/.test(a.pathname) && visible2(a) && !a.closest('[aria-hidden="true"]'));
+      for (let depth = 0; candidate2 && depth < 12; depth++, candidate2 = candidate2.parentElement) {
+        if (candidate2 === document.body || candidate2.matches('main,aside,[role="main"],[role="complementary"]') || candidate2.querySelectorAll("time").length !== 1) break;
+        if (candidate2.querySelector('nav,aside,[role="navigation"],[role="complementary"]')) break;
+        const profiles = [...candidate2.querySelectorAll("a[href]")].filter((a) => /^\/@[\w.]+\/?$/.test(a.pathname) && visible3(a) && !a.closest('[aria-hidden="true"]'));
         if (profiles.some((link) => /^(Profile|個人檔案)$/i.test(label(link)))) break;
-        const text2 = candidate.innerText?.trim() || "";
-        const postLink = [...candidate.querySelectorAll("a[href]")].some((link) => /\/post\/[\w-]+/.test(link.pathname));
+        const text2 = candidate2.innerText?.trim() || "";
+        const postLink = [...candidate2.querySelectorAll("a[href]")].some((link) => /\/post\/[\w-]+/.test(link.pathname));
         const action = /(?:liked your|replied to you|mentioned you|reposted your|quoted your|following you|followed you|回覆了你|提及了你|提到了你|轉發了你|開始追蹤你|追蹤了你|已追蹤你|讚了你的)/i.test(text2);
-        const badge = notificationBadge(candidate);
+        const badge = notificationBadge(candidate2);
         if (profiles.length && text2.length < 4e3 && badge) {
-          selected = candidate;
+          selected = candidate2;
           break;
         }
-        if (!selected && profiles.length && text2.length < 4e3 && (postLink || action)) selected = candidate;
+        if (!selected && profiles.length && text2.length < 4e3 && (postLink || action)) selected = candidate2;
       }
       if (selected && (notificationBadge(selected) || !interactive(selected).some((el) => /^(Like|Unlike|Reply|Replied|讚|收回讚|回覆|已回覆)(?:\s*\d|$)/i.test(label(el))))) rows.add(selected);
     }
     return [...rows].slice(0, 100).map((row) => {
-      const links2 = [...row.querySelectorAll("a[href]")].filter((a) => visible2(a) && !a.closest('[aria-hidden="true"]'));
+      const links2 = [...row.querySelectorAll("a[href]")].filter((a) => visible3(a) && !a.closest('[aria-hidden="true"]'));
       const time = row.querySelector("time");
       let header = time?.parentElement ?? null;
       while (header && header !== row && !links2.some((link) => /^\/@[\w.]+\/?$/.test(link.pathname) && header.contains(link))) header = header.parentElement;
       const actorLinks = links2.filter((link) => header?.contains(link));
       const aggregate = header?.innerText.match(/和另外\s*([\d,]+)\s*人|and\s+([\d,]+)\s+others?/i);
       const additionalActorCount = aggregate ? Number((aggregate[1] ?? aggregate[2]).replaceAll(",", "")) : null;
-      const actionText = [...row.querySelectorAll("span,div")].filter((el) => visible2(el) && !el.closest('a,button,[role="button"]')).map((el) => el.innerText.trim()).find((text2) => /^(?:已追蹤你|開始追蹤你|追蹤了你|started following you|followed you)$/i.test(text2)) ?? null;
+      const actionText = [...row.querySelectorAll("span,div")].filter((el) => visible3(el) && !el.closest('a,button,[role="button"]')).map((el) => el.innerText.trim()).find((text2) => /^(?:已追蹤你|開始追蹤你|追蹤了你|started following you|followed you)$/i.test(text2)) ?? null;
       return { text: row.innerText.slice(0, 4e3), actorLinks: actorLinks.flatMap((a) => {
         const username = a.pathname.match(/^\/@([\w.]+)\/?$/)?.[1];
         return username ? [{ username, url: a.href }] : [];
@@ -2000,7 +2355,7 @@ var ThreadsMCP = (() => {
     const scope = document.querySelector('main,[role="main"]') ?? document;
     for (const link of scope.querySelectorAll("a[href]")) {
       const name2 = link.pathname.match(/^\/@([\w.]+)\/?$/)?.[1];
-      if (!name2 || link.protocol !== "https:" || link.port && link.port !== "443" || !["www.threads.com", "threads.com", "www.threads.net", "threads.net"].includes(link.hostname) || link.username || link.password || !visible2(link) || link.closest('nav,aside,[role="navigation"],[role="complementary"],[aria-hidden="true"]') || /^(Profile|個人檔案)$/i.test(label(link))) continue;
+      if (!name2 || link.protocol !== "https:" || link.port && link.port !== "443" || !["www.threads.com", "threads.com", "www.threads.net", "threads.net"].includes(link.hostname) || link.username || link.password || !visible3(link) || link.closest('nav,aside,[role="navigation"],[role="complementary"],[aria-hidden="true"]') || /^(Profile|個人檔案)$/i.test(label(link))) continue;
       found.set(name2.toLowerCase(), { username: name2, url: link.href, bio: null, followers: null, following: null, private: null, links: [] });
     }
     return [...found.values()];
@@ -2023,7 +2378,7 @@ var ThreadsMCP = (() => {
     const documentRoute = navigation ? routeKey(navigation.name) : null;
     const documentMatches = documentRoute !== null && documentRoute === routeKey(location.href) && !observedRouteChange;
     const merged = documentMatches ? dedupePosts([...dom, ...parsed.posts]) : dom.map((post) => {
-      const json = parsed.posts.find((candidate) => candidate.code === post.code && candidate.author.username === post.author.username);
+      const json = parsed.posts.find((candidate2) => candidate2.code === post.code && candidate2.author.username === post.author.username);
       return json ? { ...post, id: json.id, author: { ...post.author, ...json.author.id ? { id: json.author.id } : {} } } : post;
     });
     for (const p of merged) {
@@ -2040,7 +2395,7 @@ var ThreadsMCP = (() => {
     if (size > 12e6) warnings.push("Page JSON exceeded the capture budget; result is partial.");
     if (dom.some((p) => !parsed.posts.some((x) => x.code === p.code))) warnings.push("Some posts came from visible DOM; unavailable IDs, timestamps or relationships remain unknown.");
     const replies = documentMatches ? parsed.replies.map((reply) => {
-      const post = merged.find((candidate) => candidate.code === reply.code);
+      const post = merged.find((candidate2) => candidate2.code === reply.code);
       if (!post) return reply;
       post.rootId = reply.rootId ?? post.rootId;
       post.parentId = reply.parentId ?? post.parentId;
@@ -2051,7 +2406,7 @@ var ThreadsMCP = (() => {
     const isProfileSearch = location.pathname === "/search" && new URL(location.href).searchParams.get("filter") === "profiles";
     const profiles = new Map((documentMatches && !isProfileSearch ? parsed.profiles : []).map((profile) => [profile.username.toLowerCase(), profile]));
     for (const profile of searchProfiles()) if (!profiles.has(profile.username.toLowerCase())) profiles.set(profile.username.toLowerCase(), profile);
-    return { runtimeVersion, runtimeRevision, remoteMediaVersion: 1, url: location.href, title: document.title, posts: merged, profiles: [...profiles.values()], replies, dialogUsers: dialogUsers(dialog), dialogState: readDialogState(dialog), composerState: readComposerState(), postActivity: postActivity(dialog), notificationRows: notificationRows(), visibilityState: document.visibilityState, viewer: viewer(), text: pageText, warnings, observedAt, runtimeDiagnostics: runtimeDiagnostics(dialog) };
+    return { runtimeVersion, runtimeRevision, remoteMediaVersion: 1, remoteNavigationToken: remoteViewToken(), url: location.href, title: document.title, posts: merged, profiles: [...profiles.values()], replies, dialogUsers: dialogUsers(dialog), dialogState: readDialogState(dialog), composerState: readComposerState(), postActivity: postActivity(dialog), notificationRows: notificationRows(), visibilityState: document.visibilityState, viewer: viewer(), text: pageText, warnings, observedAt, runtimeDiagnostics: runtimeDiagnostics(dialog) };
   }
   return __toCommonJS(page_runtime_exports);
 })();

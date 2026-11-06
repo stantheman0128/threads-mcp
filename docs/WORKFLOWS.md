@@ -2,6 +2,33 @@
 
 `src/workflows.ts` provides local workflow primitives. It never starts a timer or publishes when constructed. The MCP/CLI integration must explicitly invoke `runDue` and supply an authenticated publisher adapter. No live post was created to test this module.
 
+## Remote workflows in v0.7.0
+
+The HTTP surface is separately gated by `THREADS_REMOTE_ALLOW_WRITES=true` and `THREADS_REMOTE_ALLOW_SCHEDULE=true`. It registers nine existing workflow names with narrower remote schemas: save/list/delete draft, stage/list/authorize/cancel/run/reconcile schedule. A fresh exact browser account is required. Remote `accountId` is the username, not an arbitrary database namespace or numeric API identity.
+
+Remote drafts accept `{text, replyUrl?, quoteUrl?, mediaToken?}` only. Paths, media URL arrays, API IDs, alt text and unknown fields are rejected. `mediaToken` must be an existing active remote byte-upload approval bound to the same account, kind, target and composer; scheduling never extends its expiry. Long-term media scheduling and advance media staging for an unknown chain parent are unsupported. Local stdio draft schemas below remain separate.
+
+Example tool sequence (each line is a separate request; IDs are responses, not literal placeholders):
+
+```text
+threads_save_draft({accountId:"my_handle",draft:{text:"Approved first part"}})
+threads_save_draft({accountId:"my_handle",draft:{text:"Approved second part"}})
+threads_stage_schedule({accountId:"my_handle",draftIds:[FIRST_ID,SECOND_ID],at:EXPLICIT_ISO_TIME})
+# Review the returned immutable parts and normalized due time; get specific user authorization.
+threads_authorize_schedule({accountId:"my_handle",id:JOB_ID})
+threads_run_schedules({accountId:"my_handle",limit:1})
+```
+
+Run uses the browser's existing social preparation and one-time commit, with shared cooldown and revalidation. Default limit is two jobs, maximum three; one call permits at most twenty remaining parts. There is no installed timer: the host and Chrome must remain available and a caller must invoke run at/after the due time. Sleeping, stopped or disconnected hosts do not guarantee punctuality. Remote workflows live in the private `remote-index/remote-workflows` store and are not automatically consumed by the local `schedule-worker` CLI.
+
+Confirmed parts are preserved and never replayed. Reply/quote verification currently cannot establish the relationship solely from a new permalink, so a chain can stop at its first unverified reply even when a post was observed. Media similarly remains uncertain if attachments cannot be matched. These limitations are deliberate outcome boundaries, not permission to resend.
+
+`threads_cancel_schedule({accountId,id})` marks a pending job or the exact running job. During the HTTP busy interval, this is the sole allowed concurrent tool; it cannot switch accounts, navigate, read a page or release the run's lock. The final native commit guard checks cancellation after transport preflight. Already dispatched parts retain their observed outcomes; cancellation cannot retract them.
+
+Restart, bearer rotation or revocation cancels old authorizations. Durable drafts, immutable parts and uncertain evidence remain. A new authorization is required where the job state allows it; invalidating an old token never silently resumes publication.
+
+Remote reconciliation uses `{accountId,id,outcome:{status:"confirmed",postUrl,evidence}}` or `{status:"failed",evidence}`. Confirmation performs a fresh matching own-account permalink/text observation and is supported only for a root text publication. Reply, quote, later-chain and media uncertainty returns `RECONCILIATION_DIMENSIONS_UNVERIFIED`; evidence strings cannot establish these missing dimensions. Remaining parts require fresh authorization. No remote file export or arbitrary host file read is available.
+
 ## Drafts and prepared schedules
 
 `new WorkflowStore({dataDir, accountId})` stores drafts, job snapshots, publication outcomes and collection checkpoints in `dataDir/workflows.sqlite`. Use the configured `.threads-data` or `THREADS_DATA_DIR`. Account IDs are stable non-secret identifiers; rows are account scoped. Bind the publisher to the same verified account before execution. A caller selecting another account ID does not authenticate that account.

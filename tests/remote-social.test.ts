@@ -10,7 +10,7 @@ import type { SearchIndex } from '../src/search.js';
 import type { SocialRequest, SocialStage } from '../src/social-actions.js';
 import { ThreadsService } from '../src/service.js';
 import { ThreadsError } from '../src/types.js';
-import { RemoteSocialController, REMOTE_SOCIAL_KINDS, type RemoteMediaAuthorizer } from '../src/remote-social.js';
+import { RemoteSocialController, REMOTE_SOCIAL_KINDS, type RemoteMediaAuthorizer, type RemoteSocialOptions } from '../src/remote-social.js';
 import { RemoteSocialDriver } from '../src/remote-social-driver.js';
 
 const target = 'https://www.threads.com/@writer/post/EXACT';
@@ -29,6 +29,8 @@ class FixtureDriver implements BrowserDriver {
   readGate?: Promise<void>;
   stages = 0;
   uncertainCommit = false;
+  confirmationGate?: Promise<void>;
+  confirmationMismatch = false;
   lastRequest: SocialRequest = args as SocialRequest;
   status() { return { connected: true }; }
   async close() {}
@@ -53,11 +55,17 @@ class FixtureDriver implements BrowserDriver {
       if (this.uncertainCommit) throw new Error('lost reply including private data');
       return { dispatched: true, noop: false } as T;
     }
+    if (command.operation === 'prepare_confirmation') {
+      await this.confirmationGate;
+      return { token: 'private-confirmation-token', sourceToken: command.sourceToken, account: this.account, url: this.url,
+        targetUrl: this.confirmationMismatch ? target : this.lastRequest.targetUrl, kind: 'delete', expiresAt: new Date(Date.now() + 90_000).toISOString() } as T;
+    }
+    if (command.operation === 'commit_confirmation') return { dispatched: true, noop: false, verified: true } as T;
     const request = command.request as SocialRequest;
-    return { account: this.account, url: this.url, targetUrl: request.targetUrl, state: 'after', verified: true, evidence: [] } as T;
+    return { account: this.account, url: this.url, targetUrl: request.targetUrl, state: request.kind === 'delete' ? 'confirmation-required' : 'after', verified: request.kind !== 'delete', evidence: [] } as T;
   }
 }
-function fixture(minActionIntervalMs = 0, writesEnabled = true, assertAccess: () => void = () => {}, authorizeMedia?: RemoteMediaAuthorizer) {
+function fixture(minActionIntervalMs = 0, writesEnabled = true, assertAccess: () => void = () => {}, authorizeMedia?: RemoteMediaAuthorizer, options: RemoteSocialOptions = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), 'threads-remote-social-'));
   const raw = new FixtureDriver();
   const readCalls: Record<string, unknown>[] = [];
@@ -69,7 +77,7 @@ function fixture(minActionIntervalMs = 0, writesEnabled = true, assertAccess: ()
   const config: Config = { dataDir, profileDir: join(dataDir, 'profile'), channel: 'chrome', headless: true, timeoutMs: 100,
     writesEnabled, minActionIntervalMs };
   const service = new ThreadsService(readDriver, {} as SearchIndex, config);
-  const controller = new RemoteSocialController(service, raw, assertAccess, authorizeMedia);
+  const controller = new RemoteSocialController(service, raw, assertAccess, authorizeMedia, options);
   return { raw, readDriver, readCalls, service, controller, dataDir, cleanup() {
     controller.invalidatePrepared();
     assert.ok(resolve(dataDir).startsWith(resolve(tmpdir()) + '\\') || resolve(dataDir).startsWith(resolve(tmpdir()) + '/'));
@@ -77,6 +85,79 @@ function fixture(minActionIntervalMs = 0, writesEnabled = true, assertAccess: ()
   } };
 }
 const operations = (raw: FixtureDriver, name: string) => raw.commands.filter(command => command.operation === name);
+const ownDelete = { kind: 'delete', targetUrl: 'https://www.threads.com/@fixture/post/OWN', expectedAccount: 'fixture' };
+
+test('delete requires its separate flag and an own-post target', async () => {
+  const disabled = fixture();
+  try {
+    await assert.rejects(disabled.controller.prepare(ownDelete), { code: 'INVALID_INPUT' });
+    await assert.rejects(disabled.controller.prepareConfirmation('source', 'fixture', 'delete this post'), { code: 'DELETE_DISABLED' });
+    assert.equal(disabled.raw.commands.length, 0);
+  } finally { disabled.cleanup(); }
+  const enabled = fixture(0, true, () => {}, undefined, { allowDelete: true });
+  try {
+    await assert.rejects(enabled.controller.prepare({ ...ownDelete, targetUrl: target }), { code: 'ACCOUNT_MISMATCH' });
+    assert.equal(enabled.raw.commands.length, 0);
+  } finally { enabled.cleanup(); }
+});
+
+test('delete first stage never final-confirms; separate confirmation is bound, ninety-second, once-only and never asserts deletion', async () => {
+  const h = fixture(0, true, () => {}, undefined, { allowDelete: true });
+  try {
+    const prepared = await h.controller.prepare(ownDelete);
+    await assert.rejects(h.controller.prepareConfirmation(prepared.id, 'fixture', 'delete this exact own post'), { code: 'INVALID_ACTION' });
+    assert.equal((await h.controller.execute(prepared.id, 'fixture')).outcome, 'confirmation-required');
+    assert.equal(operations(h.raw, 'commit').length, 1);
+    assert.equal(operations(h.raw, 'commit_confirmation').length, 0);
+    const confirmation = await h.controller.prepareConfirmation(prepared.id, 'fixture', 'delete this exact own post');
+    assert.notEqual(confirmation.id, prepared.id);
+    assert.equal(confirmation.dispatched, false);
+    assert.ok(Date.parse(confirmation.expiresAt) <= Date.now() + 90_000);
+    assert.ok(!JSON.stringify(confirmation).includes('private-'));
+    await assert.rejects(h.controller.prepareConfirmation(prepared.id, 'fixture', 'again'), { code: 'INVALID_ACTION' });
+    const result = await h.controller.executeConfirmation(confirmation.id, 'fixture');
+    assert.equal(result.outcome, 'outcome-uncertain'); assert.equal(result.verified, false);
+    await assert.rejects(h.controller.executeConfirmation(confirmation.id, 'fixture'), { code: 'INVALID_ACTION' });
+    assert.equal(operations(h.raw, 'commit_confirmation').length, 1);
+  } finally { h.cleanup(); }
+});
+
+test('confirmation rejects wrong account, changed target, mismatched runtime binding, expired ids and bearer invalidation', async t => {
+  let now = 1_000_000; t.mock.method(Date, 'now', () => now);
+  for (const failure of ['account','target','runtime-mismatch','expired','invalidated']) {
+    const h = fixture(0, true, () => {}, undefined, { allowDelete: true });
+    try {
+      const prepared = await h.controller.prepare(ownDelete);
+      await h.controller.execute(prepared.id, 'fixture');
+      if (failure === 'account') {
+        await assert.rejects(h.controller.prepareConfirmation(prepared.id, 'other', 'purpose'), { code: 'ACCOUNT_MISMATCH' });
+      } else if (failure === 'runtime-mismatch') {
+        h.raw.confirmationMismatch = true;
+        await assert.rejects(h.controller.prepareConfirmation(prepared.id, 'fixture', 'purpose'), { code: 'INVALID_ACTION' });
+      } else {
+        const confirmation = await h.controller.prepareConfirmation(prepared.id, 'fixture', 'purpose');
+        if (failure === 'expired') { now += 90_001; await assert.rejects(h.controller.executeConfirmation(confirmation.id, 'fixture'), { code: 'EXPIRED_ACTION' }); }
+        if (failure === 'invalidated') { h.controller.invalidatePrepared(); await assert.rejects(h.controller.executeConfirmation(confirmation.id, 'fixture'), { code: 'INVALID_ACTION' }); }
+        if (failure === 'target') { h.raw.url = target; const result = await h.controller.executeConfirmation(confirmation.id, 'fixture'); assert.equal('error' in result && result.error, 'TARGET_CHANGED_ROUTE'); }
+      }
+      assert.equal(operations(h.raw, 'commit_confirmation').length, 0);
+    } finally { h.cleanup(); }
+  }
+});
+
+test('revocation during confirmation preparation cannot resurrect an id', async () => {
+  const h = fixture(0, true, () => {}, undefined, { allowDelete: true });
+  try {
+    const prepared = await h.controller.prepare(ownDelete); await h.controller.execute(prepared.id, 'fixture');
+    let release!: () => void;
+    h.raw.confirmationGate = new Promise<void>(resolve => { release = resolve; });
+    const pending = h.controller.prepareConfirmation(prepared.id, 'fixture', 'delete only this own post');
+    const rejected = assert.rejects(pending, { code: 'ACTION_CANCELLED' });
+    await new Promise(resolve => setImmediate(resolve));
+    h.controller.invalidatePrepared(); release(); await rejected;
+    assert.equal(operations(h.raw, 'commit_confirmation').length, 0);
+  } finally { h.cleanup(); }
+});
 
 function mediaFixture(kind: 'publish' | 'reply' | 'quote' = 'publish') {
   const request = { kind, targetUrl: kind === 'publish' ? 'https://www.threads.com/' : target,

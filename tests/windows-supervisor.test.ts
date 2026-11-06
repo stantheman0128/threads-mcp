@@ -23,6 +23,45 @@ class FakeChild extends EventEmitter {
   kill() { this.killed++; this.emit('exit', 0); return true; }
 }
 const healthy = async (name: string) => ({ state: name === 'bridge' ? 'host-up' : name === 'http' ? 'http-up' : 'edge-ready', browserConnected: false });
+const parityFlags = [
+  ['remoteExtendedReadsEnabled', 'THREADS_REMOTE_ALLOW_EXTENDED_READS', 'extendedReads', false],
+  ['remoteDeleteEnabled', 'THREADS_REMOTE_ALLOW_DELETE', 'delete', true],
+  ['remoteScheduleEnabled', 'THREADS_REMOTE_ALLOW_SCHEDULE', 'schedule', true],
+  ['remoteBrowserFallbackEnabled', 'THREADS_REMOTE_ALLOW_BROWSER_FALLBACK', 'browserFallback', true],
+  ['remoteMessagesEnabled', 'THREADS_REMOTE_ALLOW_MESSAGES', 'messages', false],
+  ['remoteOfficialApiEnabled', 'THREADS_REMOTE_ALLOW_OFFICIAL_API', 'officialApi', true],
+] as const;
+const disabledCapabilities = () => Object.fromEntries(parityFlags.map(([, , key]) => [key, false]));
+
+test('parity config flags default off, enforce dependencies and override every inherited allow flag', () => {
+  const inherited = Object.fromEntries(parityFlags.map(([, env]) => [env, 'true']));
+  const defaults = configured(); const defaultEnv = childEnvironment(defaults, inherited);
+  for (const [field, env, , requiresWrites] of parityFlags) {
+    assert.equal(defaults[field], false); assert.equal(defaultEnv[env], 'false');
+    for (const invalid of [undefined, null, 'true', 'false', 0, 1, {}, []])
+      assert.throws(() => configured({ remoteWritesEnabled: true, [field]: invalid }), { code: 'CONFIG_INVALID' });
+    if (requiresWrites) for (const base of [{}, { remoteWritesEnabled: false }])
+      assert.throws(() => configured({ ...base, [field]: true }), { code: 'CONFIG_INVALID' });
+    const enabled = configured({ remoteWritesEnabled: requiresWrites, [field]: true });
+    const envEnabled = childEnvironment(enabled, inherited);
+    assert.equal(envEnabled[env], 'true'); assert.equal(envEnabled.THREADS_ALLOW_WRITES, 'false');
+    for (const [other, otherEnv] of parityFlags) if (other !== field) assert.equal(envEnabled[otherEnv], 'false');
+  }
+  assert.throws(() => configured({ remoteExtendedReadEnabled: true }), { code: 'CONFIG_INVALID' });
+});
+
+test('official API host configuration reaches only explicitly enabled HTTP children', () => {
+  const source = { THREADS_API_ACCESS_TOKEN: 'SYNTHETIC_API_CONFIG', THREADS_API_USER_ID: '123', THREADS_REMOTE_ALLOW_OFFICIAL_API: 'true', THREADS_ALLOW_WRITES: 'true' };
+  for (const remoteOfficialApiEnabled of [false, true]) for (const service of [undefined, 'bridge', 'http', 'tunnel']) {
+    const config = configured({ remoteWritesEnabled: true, remoteOfficialApiEnabled });
+    const env = childEnvironment(config, source, service);
+    const forwarded = remoteOfficialApiEnabled && service === 'http';
+    assert.equal(env.THREADS_API_ACCESS_TOKEN, forwarded ? source.THREADS_API_ACCESS_TOKEN : undefined);
+    assert.equal(env.THREADS_API_USER_ID, forwarded ? '123' : undefined);
+    assert.equal(env.THREADS_REMOTE_ALLOW_OFFICIAL_API, String(remoteOfficialApiEnabled));
+    assert.equal(env.THREADS_ALLOW_WRITES, 'false');
+  }
+});
 
 test('supervisor config, command and environment prevent accidental secret/bridge exposure', () => {
   const config = configured({ tunnelEnabled: true });
@@ -217,6 +256,45 @@ test('health reports revoked access and disconnected browser separately; saved l
   }
 });
 
+test('capability health must match config, supports old disabled hosts and sanitizes saved capability data', async () => {
+  await mkdir(dataRoot, { recursive: true }); const directory = await mkdtemp(join(dataRoot, 'windows-supervisor-test-'));
+  const stateDir = join(directory, 'remote-host'); await mkdir(stateDir);
+  let capabilities: unknown; let writesEnabled = false;
+  const server = createServer((req, res) => {
+    if (req.headers.authorization !== `Bearer ${'x'.repeat(43)}`) { res.writeHead(401).end(); return; }
+    res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ service: writesEnabled ? 'threads-mcp-controlled' : 'threads-mcp-readonly', revision: 'remote-health-1', http: 'up', writesEnabled, mediaEnabled: false, capabilities, bridge: { state: 'extension-disconnected' }, browser: { connected: false } }));
+  });
+  await new Promise<void>(resolvePromise => server.listen(0, '127.0.0.1', resolvePromise));
+  try {
+    const httpPort = (server.address() as any).port;
+    await writeFile(join(directory, 'remote-access.token'), 'x'.repeat(43));
+    const base = { ...sample(directory), httpPort }; const defaults = configured(base);
+    assert.equal((await probeService(defaults, 'http')).state, 'http-up');
+    for (capabilities of [null, [], {}, 'invalid', { ...disabledCapabilities(), messages: 'false' }])
+      assert.equal((await probeService(defaults, 'http')).state, 'unexpected-response');
+    capabilities = disabledCapabilities(); assert.equal((await probeService(defaults, 'http')).state, 'http-up');
+    for (const [field, , key, requiresWrites] of parityFlags) {
+      writesEnabled = requiresWrites;
+      const enabled = configured({ ...base, remoteWritesEnabled: requiresWrites, [field]: true });
+      capabilities = undefined; assert.equal((await probeService(enabled, 'http')).state, 'unexpected-response');
+      capabilities = disabledCapabilities(); assert.equal((await probeService(enabled, 'http')).state, 'unexpected-response');
+      capabilities = { ...disabledCapabilities(), [key]: true, extra: 'SYNTHETIC_PRIVATE_CAPABILITY' };
+      const health = await probeService(enabled, 'http'); assert.equal(health.state, 'http-up'); assert.equal(health.capabilities[key], true);
+      assert.equal(JSON.stringify(health).includes('SYNTHETIC_PRIVATE'), false);
+      assert.equal((await probeService(configured({ ...base, remoteWritesEnabled: requiresWrites }), 'http')).state, 'unexpected-response');
+      const report = await diagnose(enabled); assert.equal(report.config[field], true); assert.equal(report.health.http.capabilities[key], true);
+    }
+    writesEnabled = false; capabilities = disabledCapabilities();
+    const snapshot = { schemaVersion: 1, runId: '00000000-0000-4000-8000-000000000000', supervisorPid: 1, updatedAt: new Date().toISOString(), services: Object.fromEntries(['bridge', 'http', 'tunnel'].map(service => [service, { process: 'stopped', health: { state: 'unchecked', capabilities: { ...disabledCapabilities(), extra: 'SYNTHETIC_PRIVATE_CAPABILITY' } } }])) };
+    await writeFile(join(stateDir, 'status.json'), JSON.stringify(snapshot));
+    const saved = await diagnose(defaults); assert.deepEqual(saved.supervisor.snapshot.services.http.health.capabilities, disabledCapabilities());
+    assert.equal(JSON.stringify(saved).includes('SYNTHETIC_PRIVATE'), false);
+  } finally {
+    server.closeAllConnections(); await new Promise<void>(resolvePromise => server.close(() => resolvePromise()));
+    assert.ok(directory.startsWith(join(dataRoot, 'windows-supervisor-test-'))); await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('Windows scripts parse; isolated init and protect-secrets never install a task or start services', { skip: process.platform !== 'win32' }, async () => {
   const ps = join(process.env.SystemRoot!, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   const management = join(project, 'scripts', 'windows', 'RemoteHost.ps1'); const acl = join(project, 'scripts', 'windows', 'Assert-PrivatePaths.ps1');
@@ -231,6 +309,8 @@ test('Windows scripts parse; isolated init and protect-secrets never install a t
     assert.equal(init.status, 0, init.stderr); const config = await loadConfig(configPath); assert.equal(config.tunnelEnabled, false); assert.equal(config.healthTimeoutMs, 5000);
     assert.equal(config.remoteWritesEnabled, false); assert.equal(JSON.parse(await readFile(configPath, 'utf8')).remoteWritesEnabled, false);
     assert.equal(config.remoteMediaEnabled, false); assert.equal(JSON.parse(await readFile(configPath, 'utf8')).remoteMediaEnabled, false);
+    const initial = JSON.parse(await readFile(configPath, 'utf8'));
+    for (const [field] of parityFlags) { assert.equal(config[field], false); assert.equal(initial[field], false); }
     await writeFile(join(directory, 'remote-access.token'), 'SYNTHETIC_TEST_FILE_NOT_A_CREDENTIAL');
     await writeFile(config.tunnelTokenFile, 'SYNTHETIC_TEST_FILE_NOT_A_CREDENTIAL');
     const protect = spawnSync(ps, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', management, '-Action', 'protect-secrets', '-Config', configPath], { windowsHide: true, encoding: 'utf8', timeout: 15000 });

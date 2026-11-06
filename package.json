@@ -1,6 +1,6 @@
 {
   "name": "@stan/threads-mcp",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "description": "Local Threads MCP with browser tools, provenance and multilingual semantic search",
@@ -17,7 +17,7 @@
     "dev": "tsx src/cli.ts serve",
     "login": "tsx src/cli.ts login",
     "bridge": "tsx src/cli.ts bridge",
-    "test": "tsx --test tests/*.test.ts",
+    "test": "tsx --test --test-concurrency=2 tests/*.test.ts",
     "test:live": "tsx scripts/live-smoke.ts",
     "test:background": "tsx scripts/background-smoke.ts",
     "test:browser": "tsx scripts/browser-completion-smoke.ts",

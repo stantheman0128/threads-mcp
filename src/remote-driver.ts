@@ -76,8 +76,9 @@ export class RemoteExtensionDriver implements BrowserDriver {
       ...(this.hostStatus ?? { connected: false, running: false, port: this.port ?? this.options.port ?? 19758, tab: null }), health: { ...this.health } };
   }
 
-  command<T>(command: Record<string, unknown>): Promise<T> {
+  command<T>(command: Record<string, unknown>, dispatchGuard?: () => void): Promise<T> {
     return this.serial(async () => {
+      dispatchGuard?.();
       if (this.closed) throw new ThreadsError('DRIVER_CLOSED', 'The remote driver is closed.');
       let body: string;
       try { body = JSON.stringify(command); } catch { throw new ThreadsError('INVALID_COMMAND', 'Command must be JSON serializable.'); }
@@ -86,6 +87,9 @@ export class RemoteExtensionDriver implements BrowserDriver {
       await this.refreshConnection();
       if (!this.hostStatus?.connected) throw new ThreadsError('BRIDGE_NOT_CONNECTED', 'The local bridge has no connected extension tab.');
       try {
+        // Host access can be revoked while the native pairing/status preflight
+        // awaits. This local callback never enters the serialized command body.
+        dispatchGuard?.();
         const reply = await this.request('/command', 'POST', body, command.type === 'direct_profile' ? 55000 : undefined);
         return reply.result as T;
       } catch (error) { this.recordFailure(error); throw error; }

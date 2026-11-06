@@ -42,6 +42,8 @@ function disconnect(reason = '') {
       globalThis.ThreadsMCP?.cancelMediaTransfers?.();
       globalThis.ThreadsMCP?.cancelSocialActions?.();
       globalThis.ThreadsMCP?.cancelDirectProfiles?.();
+      globalThis.ThreadsMCP?.cancelRemoteBrowserActions?.();
+      globalThis.ThreadsMCP?.cancelRemoteViews?.();
     } }).catch(() => undefined);
   }
 }
@@ -81,7 +83,7 @@ async function runtime(tabId, command, generation) {
     func: async (command, extensionVersion) => {
       const api = globalThis.ThreadsMCP;
       try {
-        if (api.runtimeVersion !== extensionVersion && (command.type === 'interact' || command.type === 'media' || (command.type === 'social' && command.operation !== 'inspect')))
+        if (api.runtimeVersion !== extensionVersion && (command.type === 'interact' || command.type === 'media' || command.type === 'remote_browser' || command.type === 'remote_view' || (command.type === 'social' && command.operation !== 'inspect')))
           throw Object.assign(new Error('Reload the extension and reconnect before preparing or executing actions; installed and page runtime versions differ.'), { code: 'RUNTIME_VERSION_MISMATCH' });
         let result;
         switch (command.type) {
@@ -91,7 +93,9 @@ async function runtime(tabId, command, generation) {
           case 'interact': result = await api.interact({ snapshotId: command.snapshotId, ref: command.ref, verb: command.verb, value: command.value }); break;
           case 'scroll': result = await api.scroll(command.pixels); break;
           case 'open_read_panel': result = await api.openReadPanel(command.panel,command.activityTab); break;
-          case 'social': result = command.operation==='stage'?await api.socialStage(command.request):command.operation==='commit'?await api.socialCommit(command.token,command.expectedAccount):await api.socialInspect(command.request,command.token);break;
+          case 'social': result = command.operation==='stage'?await api.socialStage(command.request):command.operation==='commit'?await api.socialCommit(command.token,command.expectedAccount):command.operation==='prepare_confirmation'?await api.socialPrepareConfirmation(command.sourceToken,command.expectedAccount):command.operation==='commit_confirmation'?await api.socialCommitConfirmation(command.token,command.expectedAccount):await api.socialInspect(command.request,command.token);break;
+          case 'remote_view': result=await api.remoteView(command);break;
+          case 'remote_browser': result=await api.remoteBrowser(api.validateRemoteBrowserCommand(command));break;
           case 'media': result=await api.media(command);break;
           default: throw Object.assign(new Error('Unsupported command'), { code: 'INVALID_COMMAND' });
         }
@@ -201,7 +205,7 @@ async function navigate(tabId, url, generation) {
 async function execute(command, generation) {
   if (generation !== epoch || !connected) throw failure('BRIDGE_DISCONNECTED', '連線已中斷；指令未執行。');
   if (!command || typeof command !== 'object') throw failure('INVALID_COMMAND', '指令格式錯誤。');
-  const allowed = ['navigate', 'read', 'snapshot', 'interact', 'scroll', 'open_read_panel', 'screenshot','social','media','direct_profile'];
+  const allowed = ['navigate', 'read', 'snapshot', 'interact', 'scroll', 'open_read_panel', 'screenshot','social','media','direct_profile','remote_browser','remote_view'];
   if (!allowed.includes(command.type)) throw failure('INVALID_COMMAND', '不支援這個指令。');
   // Standalone extension boundary mirrors validateDirectProfileCommand. Never
   // accept arbitrary URLs, query documents, headers, cursors or fetch options.
@@ -229,7 +233,7 @@ async function execute(command, generation) {
   if (command.type === 'open_read_panel' && !['followers', 'following', 'likers'].includes(command.panel)) throw failure('INVALID_COMMAND', '清單類型錯誤。');
   if (command.type === 'open_read_panel' && command.activityTab !== undefined && (command.panel !== 'likers' || !['likes','reposts'].includes(command.activityTab))) throw failure('INVALID_COMMAND', '貼文動態類型錯誤。');
   if (command.type === 'interact' && (typeof command.snapshotId !== 'string' || typeof command.ref !== 'string' || !['click', 'fill', 'press', 'select', 'check'].includes(command.verb))) throw failure('INVALID_COMMAND', '互動指令格式錯誤。');
-  if(command.type==='social'&&!['stage','commit','inspect'].includes(command.operation))throw failure('INVALID_COMMAND','Unknown social operation.');
+  if(command.type==='social'&&!['stage','commit','inspect','prepare_confirmation','commit_confirmation'].includes(command.operation))throw failure('INVALID_COMMAND','Unknown social operation.');
   if(command.type==='media'&&!['begin','chunk','finish','abort'].includes(command.operation))throw failure('INVALID_COMMAND','Unknown media operation.');
   return runtime(tab.id, command, generation);
 }

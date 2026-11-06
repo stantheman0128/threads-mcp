@@ -8,6 +8,7 @@ import { createServer } from 'node:http';
 import { WebSocket } from 'ws';
 import { BridgeServer } from '../src/bridge.js';
 import { RemoteExtensionDriver } from '../src/remote-driver.js';
+import { ThreadsError } from '../src/types.js';
 
 async function setup(timeout = 1000) {
   const dataDir = mkdtempSync(join(tmpdir(), 'threads-remote-'));
@@ -187,6 +188,65 @@ test('refresh health clears stale identity and distinguishes missing pairing, au
     assert.equal((unavailable.health as any).errorCode, 'ECONNREFUSED');
     assert.ok(!JSON.stringify(unavailable).includes(pairing.token));
   } finally { await cleanup(); }
+});
+
+test('dispatch guard rechecks access after a delayed native status response and never serializes or retries it', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'threads-dispatch-guard-'));
+  const requests: string[] = [];
+  const bodies: string[] = [];
+  let releaseStatus!: () => void;
+  let reachedStatus!: () => void;
+  const statusGate = new Promise<void>(resolve => { releaseStatus = resolve; });
+  const statusReached = new Promise<void>(resolve => { reachedStatus = resolve; });
+  let firstStatus = true;
+  let port = 0;
+  const status = () => ({ connected: true, running: true, port, pairingUrl: `http://127.0.0.1:${port}/`, tab: { id: 55, url: 'https://www.threads.com/' } });
+  const host = createServer((req, res) => {
+    requests.push(`${req.method} ${req.url}`);
+    const send = (body: unknown) => res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(body));
+    if (req.url === '/status') {
+      if (firstStatus) {
+        firstStatus = false; reachedStatus();
+        void statusGate.then(() => send({ status: status() }));
+      } else send({ status: status() });
+      return;
+    }
+    let body = '';
+    req.setEncoding('utf8'); req.on('data', chunk => { body += chunk; });
+    req.on('end', () => { bodies.push(body); send({ status: status(), result: { accepted: true } }); });
+  });
+  await new Promise<void>(resolve => host.listen(0, '127.0.0.1', resolve));
+  port = (host.address() as { port: number }).port;
+  writeFileSync(join(dataDir, 'bridge-pairing.json'), JSON.stringify({ port, token: 'b'.repeat(64) }));
+  const remote = new RemoteExtensionDriver({ dataDir, healthTimeoutMs: 2000 });
+  let allowed = true;
+  let guardCalls = 0;
+  const guard = () => { guardCalls++; if (!allowed) throw new ThreadsError('ACCESS_CHANGED', 'Access changed.'); };
+  try {
+    const pending = remote.command({ type: 'read' }, guard);
+    const rejected = assert.rejects(pending, { code: 'ACCESS_CHANGED' });
+    await statusReached;
+    assert.equal(guardCalls, 1);
+    allowed = false; releaseStatus(); await rejected;
+    assert.equal(guardCalls, 2);
+    assert.deepEqual(requests, ['GET /status']);
+    assert.deepEqual(bodies, []);
+
+    allowed = true;
+    assert.deepEqual(await remote.command({ type: 'read' }, guard), { accepted: true });
+    assert.equal(guardCalls, 4);
+    assert.deepEqual(requests, ['GET /status','GET /status','POST /command']);
+    assert.deepEqual(bodies, ['{"type":"read"}']);
+
+    allowed = false;
+    await assert.rejects(remote.command({ type: 'read' }, guard), { code: 'ACCESS_CHANGED' });
+    assert.equal(guardCalls, 5);
+    assert.equal(requests.length, 3, 'initial rejection performs no native preflight or command');
+  } finally {
+    releaseStatus(); await remote.close(); host.closeAllConnections();
+    await new Promise<void>(resolve => host.close(() => resolve()));
+    rmSync(dataDir, { recursive: true, force: true });
+  }
 });
 
 test('health timeout is bounded, emits no browser command and never substitutes stale success', async () => {

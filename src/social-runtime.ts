@@ -5,6 +5,8 @@ export type SocialKind = typeof socialKinds[number];
 export interface SocialRequest { kind: SocialKind; targetUrl: string; text?: string; mediaToken?: string; }
 export interface SocialObservation { account: string; url: string; targetUrl: string; state: string; verified: boolean; evidence: string[]; postUrl?: string; }
 export interface SocialStage { token: string; account: string; url: string; request: SocialRequest; before: SocialObservation; noop: boolean; }
+export interface SocialConfirmationStage { token: string; sourceToken: string; account: string; url: string; targetUrl: string; kind: 'delete'; expiresAt: string; }
+interface ConfirmationEntry extends SocialConfirmationStage { source: Entry; dialog: HTMLElement; control: HTMLElement; dialogFingerprint: string; controlFingerprint: string; expires: number; consumed: boolean; }
 interface TargetPreview { author: string; timestamp: string; body: string; }
 export interface MediaComposeRequest { kind: 'publish' | 'reply' | 'quote'; targetUrl: string; }
 /** Internal DOM binding only; never serialized through the bridge. */
@@ -12,13 +14,16 @@ export interface MediaComposerBinding {
   request: MediaComposeRequest; account: string; scope: HTMLElement; editor: HTMLElement;
   targetScope?: HTMLElement; replyPreview?: { element: HTMLElement; evidence: TargetPreview };
 }
-interface Entry extends SocialStage { element?: HTMLElement; fingerprint?: string; scope?: HTMLElement; targetScope?: HTMLElement; editor?: HTMLElement; replyPreview?: { element: HTMLElement; evidence: TargetPreview }; beforeUrls: Set<string>; expires: number; consumed: boolean; committedAt?: number; }
+interface Entry extends SocialStage { element?: HTMLElement; fingerprint?: string; scope?: HTMLElement; targetScope?: HTMLElement; editor?: HTMLElement; replyPreview?: { element: HTMLElement; evidence: TargetPreview }; beforeUrls: Set<string>; expires: number; consumed: boolean; committedAt?: number;
+  deleteObserver?: MutationObserver; inspectDeleteMutations?: () => void; deleteDialog?: HTMLElement; deleteDialogInvalid?: boolean; deleteTargetFingerprint?: string; confirmationPrepared?: boolean; }
 let staged: Entry | undefined;
+let confirmation: ConfirmationEntry | undefined;
 let generation = 0;
 let removeTakeoverWatch: (() => void) | undefined;
 let expiryTimer: number | undefined;
 export function cancelSocialActions(): void {
-  generation++; staged = undefined;
+  staged?.deleteObserver?.disconnect();
+  generation++; staged = undefined; confirmation = undefined;
   removeTakeoverWatch?.(); removeTakeoverWatch = undefined;
   if (expiryTimer !== undefined) window.clearTimeout(expiryTimer);
   expiryTimer = undefined;
@@ -460,7 +465,85 @@ export function socialCommit(token: string, expectedAccount: string): { dispatch
     if (!entry.targetScope?.isConnected || !entry.replyPreview || matchingReplyPreview(entry.scope, entry.editor, entry.request.targetUrl, entry.replyPreview.evidence) !== entry.replyPreview.element)
       fail('TARGET_CHANGED', 'The composer target preview changed after preparation.');
   }
-  entry.committedAt = Date.now(); el.click(); return { dispatched: true, noop: false };
+  if (entry.request.kind === 'delete') watchDeleteDialog(entry);
+  entry.committedAt = Date.now(); el.click(); entry.inspectDeleteMutations?.(); return { dispatched: true, noop: false };
+}
+function confirmationDialogs(): HTMLElement[] {
+  return [...document.querySelectorAll<HTMLElement>('[role="dialog"],[role="alertdialog"]')].filter(isVisible);
+}
+/** Own the first new dialog produced after this exact Delete menu dispatch. */
+function watchDeleteDialog(entry: Entry): void {
+  const expectedGeneration = generation;
+  entry.deleteTargetFingerprint = fingerprint(entry.targetScope!);
+  const baseline = new Set(confirmationDialogs());
+  const inspect = (records: MutationRecord[]) => {
+    if (generation !== expectedGeneration || staged !== entry) return;
+    for (const record of records) {
+      if (record.type === 'childList' && [...record.removedNodes].some(node =>
+        (entry.deleteDialog && (node === entry.deleteDialog || node.contains(entry.deleteDialog))) ||
+        (entry.targetScope && (node === entry.targetScope || node.contains(entry.targetScope))))) entry.deleteDialogInvalid = true;
+      if (entry.deleteDialog && record.type === 'attributes' && record.target instanceof Element && record.target.contains(entry.deleteDialog) &&
+          ['style','hidden','aria-hidden','inert'].includes(record.attributeName ?? '')) entry.deleteDialogInvalid = true;
+    }
+    const current = confirmationDialogs().filter(dialog => !baseline.has(dialog));
+    if (current.length > 1 || (entry.deleteDialog && (current.length !== 1 || current[0] !== entry.deleteDialog))) entry.deleteDialogInvalid = true;
+    if (!entry.deleteDialog && current.length === 1) entry.deleteDialog = current[0];
+  };
+  entry.deleteObserver = new MutationObserver(inspect);
+  entry.deleteObserver.observe(document.documentElement, { childList: true, subtree: true, attributes: true });
+  entry.inspectDeleteMutations = () => inspect(entry.deleteObserver!.takeRecords());
+}
+function boundDeleteDialog(entry: Entry): { dialog: HTMLElement; control: HTMLElement } {
+  if (staged !== entry || entry.request.kind !== 'delete' || !entry.consumed || !entry.committedAt || entry.noop)
+    fail('INVALID_ACTION', 'A consumed exact own-post Delete action is required.');
+  const ctx = context(entry.request);
+  if (ctx.account !== entry.account) fail('ACCOUNT_MISMATCH', 'The selected account changed.');
+  const target = postCard(entry.request.targetUrl);
+  if (target !== entry.targetScope || fingerprint(target) !== entry.deleteTargetFingerprint) fail('TARGET_CHANGED', 'The original own-post card changed before confirmation.');
+  assertOwnPost(entry.request, target, entry.account);
+  entry.inspectDeleteMutations?.();
+  const dialog = entry.deleteDialog;
+  const current = confirmationDialogs();
+  if (entry.deleteDialogInvalid || !dialog || !isVisible(dialog) || current.length !== 1 || current[0] !== dialog || overlays().some(overlay => overlay !== dialog))
+    fail('CONFIRMATION_CHANGED', 'The original unique delete confirmation dialog is unavailable or changed.');
+  const targetLinks = links(dialog);
+  if (targetLinks.some(link => link.url !== entry.request.targetUrl)) fail('TARGET_CHANGED', 'The confirmation contains a different post target.');
+  const labels = [dialog.getAttribute('aria-label'), ...[...dialog.querySelectorAll('h1,h2,h3,[role="heading"]')].filter(isVisible).map(el => (el as HTMLElement).innerText)].map(normalizedName);
+  if (!labels.some(label => /^(?:Delete(?: (?:post|thread))?|刪除(?:貼文|串文)?|删除(?:帖子|串文)?)[?？]?$/i.test(label)))
+    fail('CONFIRMATION_UNVERIFIED', 'An explicit delete confirmation heading is required.');
+  const control = only(controls(dialog).filter(el => /^(?:Delete(?: (?:post|thread))?|刪除|删除)$/i.test(name(el))), 'A unique final Delete control is required.', 'CONFIRMATION_UNVERIFIED');
+  only(controls(dialog).filter(el => /^(?:Cancel|取消)$/i.test(name(el))), 'A unique Cancel control is required.', 'CONFIRMATION_UNVERIFIED');
+  if (control.matches(':disabled,[aria-disabled="true"]')) fail('CONFIRMATION_UNVERIFIED', 'The final Delete control is disabled.');
+  return { dialog, control };
+}
+export function socialPrepareConfirmation(sourceToken: string, expectedAccount: string): SocialConfirmationStage {
+  const source = staged;
+  if (!source || source.token !== sourceToken || source.confirmationPrepared) fail('INVALID_ACTION', 'The delete confirmation source is absent or consumed.');
+  source.confirmationPrepared = true;
+  if (Date.now() > source.expires) fail('EXPIRED_ACTION', 'Prepare the Delete action again.');
+  if (expectedAccount.replace(/^@/, '').toLowerCase() !== source.account) fail('ACCOUNT_MISMATCH', 'Expected account differs from the delete source.');
+  const { dialog, control } = boundDeleteDialog(source);
+  const expires = Date.now() + 90_000;
+  const result: SocialConfirmationStage = { token: crypto.randomUUID(), sourceToken, account: source.account, url: source.url,
+    targetUrl: source.request.targetUrl, kind: 'delete', expiresAt: new Date(expires).toISOString() };
+  confirmation = { ...result, source, dialog, control, dialogFingerprint: fingerprint(dialog), controlFingerprint: fingerprint(control), expires, consumed: false };
+  source.expires = expires;
+  if (expiryTimer !== undefined) window.clearTimeout(expiryTimer);
+  const expectedGeneration = generation;
+  expiryTimer = window.setTimeout(() => { if (generation === expectedGeneration) cancelSocialActions(); }, 90_000);
+  return result;
+}
+export function socialCommitConfirmation(token: string, expectedAccount: string): { dispatched: true; noop: false; verified: false; outcome: 'outcome-uncertain'; targetUrl: string } {
+  const entry = confirmation;
+  if (!entry || entry.token !== token || entry.consumed) fail('INVALID_ACTION', 'The final confirmation is absent or consumed.');
+  entry.consumed = true;
+  if (Date.now() > entry.expires) fail('EXPIRED_ACTION', 'Prepare the Delete action again.');
+  if (expectedAccount.replace(/^@/, '').toLowerCase() !== entry.account) fail('ACCOUNT_MISMATCH', 'Expected account differs from final confirmation.');
+  const { dialog, control } = boundDeleteDialog(entry.source);
+  if (dialog !== entry.dialog || control !== entry.control || fingerprint(dialog) !== entry.dialogFingerprint || fingerprint(control) !== entry.controlFingerprint)
+    fail('STALE_ELEMENT', 'The exact confirmation dialog or Delete control changed.');
+  control.click();
+  return { dispatched: true, noop: false, verified: false, outcome: 'outcome-uncertain', targetUrl: entry.targetUrl };
 }
 export async function socialInspect(input: SocialRequest, token?: string): Promise<SocialObservation> {
   const expectedGeneration = generation;

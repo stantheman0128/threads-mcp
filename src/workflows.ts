@@ -6,7 +6,7 @@ import { ThreadsError, type Post, type Completeness } from './types.js';
 import {postTarget} from './urls.js';
 
 export interface DraftMedia { type: 'image' | 'video'; url?: string; path?: string; altText?: string; }
-export interface DraftInput { text?: string; media?: DraftMedia[]; replyTo?: string; replyUrl?:string; quoteUrl?: string; quotePostId?: string; }
+export interface DraftInput { text?: string; media?: DraftMedia[]; mediaToken?: string; replyTo?: string; replyUrl?:string; quoteUrl?: string; quotePostId?: string; }
 export interface Draft extends DraftInput { id: string; accountId: string; createdAt: string; updatedAt: string; }
 export type PublishOutcome = { status: 'confirmed'; postId: string; postUrl?: string; evidence: string[] } |
   { status: 'uncertain' | 'failed'; evidence: string[] };
@@ -42,6 +42,8 @@ function publicUrl(value: string): void {
   if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) invalid('URLs must use HTTP(S) without embedded credentials.');
 }
 export function validateDraft(input: DraftInput): DraftInput {
+  if (input.mediaToken !== undefined && (typeof input.mediaToken !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(input.mediaToken))) invalid('Media approval token is invalid.');
+  if (input.mediaToken !== undefined && input.media?.length) invalid('Choose a staged media token or media items.');
   if (typeof input.text !== 'undefined' && (typeof input.text !== 'string' || [...input.text].length > 500)) invalid('Draft text must contain at most 500 Unicode characters.');
   if (input.media && (!Array.isArray(input.media) || input.media.length > 20)) invalid('Drafts support at most 20 media items.');
   if (!input.text?.trim() && !input.media?.length) invalid('A draft needs text or media.');

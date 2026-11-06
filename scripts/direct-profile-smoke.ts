@@ -15,13 +15,13 @@ if(url.protocol!=='https:'&&!(url.protocol==='http:'&&url.hostname==='127.0.0.1'
 if(url.username||url.password||url.search||url.hash)throw Error('Endpoint must not contain credentials, query or fragment.');
 const target=process.env.THREADS_DIRECT_USERNAME??'threads';
 if(!/^[A-Za-z0-9_.]{1,30}$/.test(target))throw Error('Invalid target username.');
-const client=new Client({name:'direct-profile-acceptance',version:'0.6.0'});
+const client=new Client({name:'direct-profile-acceptance',version:'0.7.0'});
 const driver=new RemoteExtensionDriver({dataDir:config.dataDir,port:Number(process.env.THREADS_BRIDGE_PORT??19758)});
 const report:any={status:'BLOCKED',transport:url.protocol==='https:'?'https':'loopback',startedAt:new Date().toISOString(),publicMutations:0,checks:[]};
 let originalRoute:string|undefined;
 try{
  await driver.connect();const initial=await driver.command<any>({type:'read'});
- assert.equal(initial.extensionVersion,'0.6.0');assert.equal(initial.runtimeVersion,'0.6.0');
+ assert.equal(initial.extensionVersion,'0.7.0');assert.equal(initial.runtimeVersion,'0.7.0');
  assert.ok(initial.viewer.username);assert.ok(!initial.composerState?.present);originalRoute=initial.url;
  const token=readFileSync(join(config.dataDir,'remote-access.token'),'utf8').trim();
  await client.connect(new StreamableHTTPClientTransport(url,{requestInit:{headers:{Authorization:`Bearer ${token}`}}}));

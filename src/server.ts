@@ -6,24 +6,28 @@ import {registerAdvancedTools} from './advanced-tools.js';
 import {remoteHealth} from './remote-health.js';
 import {REMOTE_SOCIAL_KINDS,type RemoteSocialController} from './remote-social.js';
 import type {RemoteMediaController} from './remote-media.js';
+import {remoteCapabilities} from './remote-capabilities.js';
+import {additionalRemoteTools,registerRemoteTools,REMOTE_OVERRIDE_TOOLS,type RemoteControllers} from './remote-tools.js';
 const rounds=z.number().int().min(0).max(10).default(1).describe('Additional automatic scroll-and-read passes after navigating to the requested source. No manual scrolling is needed. Use 0 for a minimal connection check; increase gradually for broader partial coverage.');
 export const REMOTE_READ_TOOLS=new Set(['threads_status','threads_search','threads_research','threads_my_activity','threads_find_mentions','threads_get_post','threads_get_post_activity','threads_get_replies','threads_get_profile','threads_get_connections','threads_check_relationship','threads_search_users','threads_discover','threads_reply_inbox','threads_batch_read']);
 export const REMOTE_SOCIAL_TOOLS=new Set(['threads_inspect_social','threads_prepare_social','threads_execute_social']);
 export const REMOTE_MEDIA_TOOLS=new Set(['threads_stage_media_remote']);
-export function createServer(service:ThreadsService,options:{remoteReadOnly?:boolean;remoteSocial?:RemoteSocialController;remoteMedia?:RemoteMediaController}={}){
+export function createServer(service:ThreadsService,options:{remoteReadOnly?:boolean;remoteSocial?:RemoteSocialController;remoteMedia?:RemoteMediaController}&RemoteControllers={}){
   if(options.remoteMedia&&!options.remoteSocial)throw new Error('Remote media requires controlled social writes.');
-  const remote=options.remoteReadOnly===true||!!options.remoteSocial;
-  const remoteTools=new Set([...REMOTE_READ_TOOLS,...(options.remoteSocial?REMOTE_SOCIAL_TOOLS:[]),...(options.remoteMedia?REMOTE_MEDIA_TOOLS:[])]);
-  const server=new McpServer({name:'stan-threads-mcp',version:'0.6.0'});
+  const remote=options.remoteReadOnly!==undefined||!!options.remoteSocial;
+  const capabilities=remoteCapabilities(options.capabilities);
+  const remoteTools=new Set([...REMOTE_READ_TOOLS,...(options.remoteSocial?REMOTE_SOCIAL_TOOLS:[]),...(options.remoteMedia?REMOTE_MEDIA_TOOLS:[]),...additionalRemoteTools(capabilities)]);
+  const server=new McpServer({name:'stan-threads-mcp',version:'0.7.0'});
   const research=new ThreadsResearch(service);
   const filters={mode:z.enum(['lexical','semantic','hybrid']).default('hybrid'),limit:z.number().int().min(1).max(100).default(20),since:z.string().datetime().optional(),until:z.string().datetime().optional(),author:z.string().optional(),minLikes:z.number().nonnegative().optional(),excludeTerms:z.array(z.string().min(1).max(100)).max(20).optional(),onlyReplies:z.boolean().optional()};
+  let registeringRemote=false;
   function tool(name:string,description:string,schema:z.ZodObject<any>,fn:(args:any)=>unknown,readOnly=true){
-    if(remote&&!remoteTools.has(name))return;
+    if(remote&&(!remoteTools.has(name)||(!registeringRemote&&REMOTE_OVERRIDE_TOOLS.has(name))))return;
     server.registerTool(name,{description,inputSchema:schema,annotations:{readOnlyHint:readOnly,destructiveHint:!readOnly,idempotentHint:readOnly,openWorldHint:true}},async args=>{
       try {
         let result=await fn(args);
         if(remote&&name==='threads_status'){
-          const status=service.status();const health=await remoteHealth(service);result={browser:health.browser,health,index:status.index,writesEnabled:!!options.remoteSocial,mediaEnabled:!!options.remoteMedia,remoteReadOnly:!options.remoteSocial,tools:[...remoteTools],allowedWriteKinds:options.remoteSocial?[...REMOTE_SOCIAL_KINDS]:[],scope:'Bounded structured reads and optionally enabled named social preparation/execution and isolated byte uploads through the selected tab. No messages, arbitrary browser controls, official API, local-path media upload, deletion, schedules or filesystem export. Remote corpus is separate from the local index.'};
+          const status=service.status();const health=await remoteHealth(service);result={browser:health.browser,health,index:status.index,writesEnabled:!!options.remoteSocial,mediaEnabled:!!options.remoteMedia,remoteReadOnly:!options.remoteSocial,capabilities,tools:[...remoteTools],allowedWriteKinds:options.remoteSocial?[...REMOTE_SOCIAL_KINDS,...(capabilities.delete?['delete']:[])]:[],scope:'Named Threads capabilities only. Additional views, deletion, workflows, public navigation, private message-list reads and official API each require their explicit capability. No arbitrary DOM actions, JS, local-path media or filesystem export. Private views are not indexed.'};
         }
         if(remote&&name==='threads_discover'){
           const r=result as any;result={posts:r.posts,sourceUrl:r.sourceUrl,observedAt:r.observedAt,completeness:r.completeness,warnings:r.warnings};
@@ -57,10 +61,10 @@ export function createServer(service:ThreadsService,options:{remoteReadOnly?:boo
   if(options.remoteSocial){
     const social=options.remoteSocial;
     const account=z.string().regex(/^@?[A-Za-z0-9_.]{1,30}$/);
-    const request={kind:z.enum(REMOTE_SOCIAL_KINDS),targetUrl:z.string().url().max(2000),text:z.string().max(2000).refine(value=>Array.from(value).length<=500,'At most 500 characters').optional(),expectedAccount:account,...(options.remoteMedia?{mediaToken:z.string().regex(/^[A-Za-z0-9_-]{1,100}$/).optional()}: {})};
+    const request={kind:z.enum(capabilities.delete?[...REMOTE_SOCIAL_KINDS,'delete']:REMOTE_SOCIAL_KINDS),targetUrl:z.string().url().max(2000),text:z.string().max(2000).refine(value=>Array.from(value).length<=500,'At most 500 characters').optional(),expectedAccount:account,...(options.remoteMedia?{mediaToken:z.string().regex(/^[A-Za-z0-9_-]{1,100}$/).optional()}: {})};
     tool('threads_inspect_social','Inspect an exact named social state for the expected signed-in account. May navigate to the exact public target only when no draft/composer is active. Does not change social state.',z.object(request).strict(),a=>social.inspect(a));
     tool('threads_prepare_social','Prepare an explicitly requested named action for an exact account/target/text. May navigate, open a menu/composer or fill an empty draft; never submits. Review returned id, account, request and expiry before execute. Requires specific user intent; enabling writes alone is not authorization to post or interact.',z.object(request).strict(),a=>social.prepare(a),false);
-    tool('threads_execute_social','Execute the reviewed preparation exactly once for expectedAccount. Requires user authorization for that exact effect. Expired, mismatched and consumed IDs fail closed. Uncertain results require inspection, never replay. No arbitrary UI controls or final deletion.',z.object({id:z.string().uuid(),expectedAccount:account}).strict(),a=>social.execute(a.id,a.expectedAccount),false);
+    tool('threads_execute_social','Execute the reviewed preparation exactly once for expectedAccount. Requires user authorization for that exact effect. Expired, mismatched and consumed IDs fail closed. Uncertain results require inspection, never replay. Deletion stops at confirmation-required; final deletion requires a separate reviewed confirmation preparation and execution. No arbitrary UI controls.',z.object({id:z.string().uuid(),expectedAccount:account}).strict(),a=>social.execute(a.id,a.expectedAccount),false);
     if(options.remoteMedia){
       const media=options.remoteMedia;
       tool('threads_stage_media_remote','Controlled byte upload, never a local-path reader or publisher. begin: client-generated uploadId UUID, expectedAccount, kind publish/reply/quote, canonical targetUrl and files(name,mime,size,sha256). chunk: uploadId, expectedAccount, fileIndex, exact offset and canonical base64 data (<=32768 decoded bytes). status/finish/abort: uploadId and expectedAccount only. Query status after timeout; never blindly replay finish. finish validates all bytes then opens an empty target-bound composer and stages files; review mediaToken via prepare_social before a separate once-only execute. 5-minute upload, 20 files, image8MiB/video64MiB/total64MiB. No URL downloads or alt text support.',z.object({
@@ -71,5 +75,6 @@ export function createServer(service:ThreadsService,options:{remoteReadOnly?:boo
       }).strict(),a=>media.handle(a),false);
     }
   }
+  if(remote){registeringRemote=true;registerRemoteTools(tool,{...options,capabilities});}
   return server;
 }

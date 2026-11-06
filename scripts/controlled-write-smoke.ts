@@ -7,7 +7,7 @@ import {RemoteExtensionDriver} from '../src/remote-driver.js';
 const expectedMedia=process.env.THREADS_HTTP_EXPECT_MEDIA==='true';
 const config=getConfig();const endpoint=new URL(process.env.THREADS_REMOTE_URL??'http://127.0.0.1:19759/mcp');
 if((endpoint.protocol!=='https:'&&!(endpoint.protocol==='http:'&&endpoint.hostname==='127.0.0.1'))||endpoint.username||endpoint.password||endpoint.search)throw Error('Invalid endpoint');
-const client=new Client({name:'controlled-write-noop-acceptance',version:'0.6.0'});
+const client=new Client({name:'controlled-write-noop-acceptance',version:'0.7.0'});
 const driver=new RemoteExtensionDriver({dataDir:config.dataDir,port:Number(process.env.THREADS_BRIDGE_PORT??19758)});
 const report:any={status:'FAIL',publicMutations:0,startedAt:new Date().toISOString()};let restore:string|undefined,phase='connect';
 async function call(name:string,args:any={}){phase=name;const response=await client.callTool({name,arguments:args},undefined,{timeout:90000});if(response.isError){let code='REMOTE_FAILED';try{code=JSON.parse((response.content[0] as any).text).error;}catch{}throw Object.assign(new Error('Remote failed'),{code});}return response.structuredContent as any;}
