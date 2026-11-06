@@ -14,7 +14,7 @@ import {MediaController} from './media.js';
 
 type Register=(name:string,description:string,schema:z.ZodObject<any>,fn:(args:any)=>unknown,readOnly?:boolean)=>void;
 const account=z.string().min(1).max(200);
-const rounds=z.number().int().min(0).max(3).default(0);
+const rounds=z.number().int().min(0).max(3).default(0).describe('Automatic scroll-and-read passes at the requested source; no manual scrolling required. Zero reads only the initial loaded window.');
 const media=z.object({type:z.enum(['image','video']),url:z.string().url().optional(),path:z.string().optional(),altText:z.string().max(1000).optional()});
 const draft=z.object({text:z.string().optional(),media:z.array(media).max(20).optional(),replyTo:z.string().optional(),replyUrl:z.string().url().optional(),quoteUrl:z.string().url().optional(),quotePostId:z.string().regex(/^\d+$/).optional()});
 

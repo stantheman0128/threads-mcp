@@ -1,6 +1,6 @@
 # Threads MCP
 
-Grok Bot 可透過獨立金鑰保護的遠端 HTTP 入口，沿用帳號持有者電腦已登入的 Threads。遠端僅開放 15 個結構化讀取工具；設定與限制見 [REMOTE-MCP.md](docs/REMOTE-MCP.md)。
+Grok Bot 可透過獨立金鑰保護的遠端 HTTP 入口，沿用帳號持有者電腦已登入的 Threads，維持 15 個結構化唯讀工具。長期使用推薦固定 hostname 的 Cloudflare managed tunnel；Quick Tunnel 僅供臨時除錯。先看 [遠端部署與分層診斷](docs/REMOTE-MCP.md)、[Windows 登入啟動與恢復](docs/WINDOWS-REMOTE-HOST.md)，再依 [Grok 的 mcp-remote/header-file 設定](docs/GROK-BOT.md) 連線。搜尋工具可自行導向與捲動，不需要使用者手動滑頁；Chrome／bridge 重啟後仍需手動配對，不能把 19758 配對主機公開。
 
 **Grok Bot 安裝入口：[docs/GROK-BOT.md](docs/GROK-BOT.md)**。本專案使用本機 stdio；Bot 需在自己的電腦安裝並登入 Threads。GitHub 連結不是已部署的遠端 MCP 端點。
 

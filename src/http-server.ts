@@ -1,12 +1,13 @@
 import {createServer as createHttpServer, type IncomingMessage, type ServerResponse} from 'node:http';
 import {randomBytes,timingSafeEqual} from 'node:crypto';
-import {mkdirSync,readFileSync,writeFileSync} from 'node:fs';
+import {existsSync,mkdirSync,writeFileSync,unlinkSync} from 'node:fs';
 import {join} from 'node:path';
 import {WebStandardStreamableHTTPServerTransport} from '@modelcontextprotocol/server';
 import {createServer} from './server.js';
 import type {ThreadsService} from './service.js';
 import type {BrowserDriver} from './driver.js';
 import {ThreadsError} from './types.js';
+import {remoteHealth} from './remote-health.js';
 
 const MAX_BODY=64*1024;
 const validToken=(value:string)=>/^[A-Za-z0-9_-]{43,128}$/.test(value);
@@ -14,16 +15,29 @@ const validToken=(value:string)=>/^[A-Za-z0-9_-]{43,128}$/.test(value);
 /** The remote bearer is independent of the extension's pairing secret. Never log it. */
 export function ensureRemoteToken(dataDir:string):string{
   mkdirSync(dataDir,{recursive:true});const path=join(dataDir,'remote-access.token');
+  const marker=join(dataDir,'remote-access.initialized');
+  // Deleting a token is revocation, including across automatic process restarts.
+  if(!existsSync(path)&&existsSync(marker))return path;
   try{writeFileSync(path,randomBytes(32).toString('base64url'),{flag:'wx',mode:0o600});}
   catch(error){if((error as NodeJS.ErrnoException).code!=='EEXIST')throw error;}
-  if(!validToken(readFileSync(path,'utf8').trim()))throw new Error('Invalid remote access token file.');
+  // Invalid existing files are never replaced silently; authenticated requests stay disabled.
+  writeFileSync(marker,'Remote access was initialized. Missing token means revoked.\n',{mode:0o600});
   return path;
+}
+
+export function changeRemoteToken(dataDir:string,action:'rotate'|'revoke'){
+  mkdirSync(dataDir,{recursive:true});
+  writeFileSync(join(dataDir,'remote-access.initialized'),'Explicit token management; missing token means revoked.\n',{mode:0o600});
+  const path=join(dataDir,'remote-access.token');
+  if(action==='rotate')writeFileSync(path,randomBytes(32).toString('base64url'),{mode:0o600});
+  else try{unlinkSync(path);}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
 }
 
 /** Only approved read commands can reach the browser; never index a private/current arbitrary route. */
 export class RemoteReadDriver implements BrowserDriver{
   constructor(private readonly driver:BrowserDriver){}
   status(){return this.driver.status();}
+  async refreshStatus(){return this.driver.refreshStatus?this.driver.refreshStatus():this.driver.status();}
   async command<T>(command:Record<string,unknown>):Promise<T>{
     if(!['read','navigate','scroll','open_read_panel'].includes(String(command.type)))throw new ThreadsError('REMOTE_READ_ONLY','Unsupported remote browser operation.');
     if(command.type==='navigate'&&!safeReadUrl(command.url))throw new ThreadsError('REMOTE_ROUTE_DENIED','Unsupported remote read route.');
@@ -47,7 +61,7 @@ function safeReadUrl(value:unknown):boolean{
 export async function startRemoteHttp(service:ThreadsService,options:{port:number;readToken:()=>string}){
   if(service.config.writesEnabled)throw new Error('Remote HTTP requires writes disabled.');
   if(!Number.isInteger(options.port)||options.port<0||options.port>65535)throw new Error('Invalid remote HTTP port.');
-  if(!validToken(options.readToken()))throw new Error('A valid remote access token is required.');
+  // A revoked/missing token leaves HTTP alive but fails closed, even under a supervisor.
   let busy=false;
   const send=(res:ServerResponse,status:number,error:string)=>{res.writeHead(status,{'Content-Type':'application/json'}).end(JSON.stringify({error}));};
   async function handle(req:IncomingMessage,res:ServerResponse){
@@ -57,8 +71,12 @@ export async function startRemoteHttp(service:ThreadsService,options:{port:numbe
     if(req.headers.host!==`127.0.0.1:${port}`||req.headers.origin||req.headers['sec-fetch-site']==='cross-site'){send(res,403,'Forbidden');return;}
     let token:string;try{token=options.readToken();}catch{send(res,503,'Access disabled');return;}
     const auth=req.headers.authorization??'';const expected=`Bearer ${token}`;
-    if(!validToken(token)||Buffer.byteLength(auth)!==Buffer.byteLength(expected)||!timingSafeEqual(Buffer.from(auth),Buffer.from(expected))){
+    if(!validToken(token)){send(res,503,'Access disabled');return;}
+    if(Buffer.byteLength(auth)!==Buffer.byteLength(expected)||!timingSafeEqual(Buffer.from(auth),Buffer.from(expected))){
       res.setHeader('WWW-Authenticate','Bearer realm="threads-mcp"');send(res,401,'Unauthorized');return;
+    }
+    if(req.url==='/healthz'&&req.method==='GET'){
+      const health=await remoteHealth(service,!busy);res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify({...health,busy}));return;
     }
     if(req.url!=='/mcp'){send(res,404,'Not found');return;}
     if(req.method!=='POST'){res.setHeader('Allow','POST');send(res,405,'Use MCP JSON POST');return;}

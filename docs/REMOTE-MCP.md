@@ -1,55 +1,112 @@
-# Remote read-only MCP for Grok Bot
+# Reliable remote read-only MCP
 
-The `serve-http` command exposes a separate, authenticated MCP endpoint. Threads cookies stay in the owner's Chrome profile. The extension pairing host at port 19758 must remain local and must never be tunneled.
+Use a **Cloudflare remotely managed tunnel with a fixed hostname** for Grok Bot. Quick Tunnel is only for temporary debugging. The endpoint uses authenticated, stateless Streamable HTTP with JSON responses; cookies stay in the owner's Chrome.
 
-## Access scope
+**Never publish port 19758.** It is the local extension pairing host, not a remote MCP endpoint. Tunnel only `http://127.0.0.1:19759`. A hostname or tunnel does not replace bearer authentication.
 
-The endpoint exposes 15 explicitly selected structured read tools: status, search, research, own activity (including liked/saved), mentions, posts, replies, profiles, post likes/reposts, followers/following, relationship checks, profile search, discovery, reply inbox and batch reads. Opening these views navigates the selected tab. Results are partial observations, not complete account history.
+## Scope and recovery boundaries
 
-No messages, notifications, arbitrary browser controls, social writes, media uploads, official API, drafts, schedules or filesystem export tools are registered. Writes stay disabled even if the surrounding environment sets `THREADS_ALLOW_WRITES=true`. Remote observations use a separate `remote-index` directory, not the existing local corpus. Discovery and status omit raw page/connection details.
+There are still exactly 15 remote tools: `threads_status`, `threads_search`, `threads_research`, `threads_my_activity`, `threads_find_mentions`, `threads_get_post`, `threads_get_post_activity`, `threads_get_replies`, `threads_get_profile`, `threads_get_connections`, `threads_check_relationship`, `threads_search_users`, `threads_discover`, `threads_reply_inbox`, `threads_batch_read`.
 
-Anyone holding the remote bearer token can read the allowed account data, including liked/saved posts and the account's replies. Use it only with a trusted client. It is a different secret from the extension pairing token. Do not put either token in chat, a URL, source code or logs.
+No messages, notifications, arbitrary browser controls, social writes, media uploads, official API, drafts, schedules or filesystem export tools are registered. Writes stay disabled even if `THREADS_ALLOW_WRITES=true` is inherited. Observations use the separate `remote-index` directory. Allowed reads include liked/saved posts and personal activity; give access only to a trusted client. Results are bounded observations, not complete history.
 
-## Start locally
+Recovery restarts services and prepares the next read. It **does not replay a failed browser command**, reconnect a manually disconnected tab, log in to Threads, or solve a challenge. Chrome's session-only pairing and a new bridge token require user pairing after either restarts. HTTP remains available while bridge is absent and adopts fresh local pairing information before a subsequent command; no HTTP restart is needed just because bridge restarted.
 
-Build first with `npm ci` and `npm run build`. Start the local bridge if it is not already running:
+## 1. Configure the permanent route once
 
-```text
-node dist/cli.js bridge
+Prerequisites: Node.js 24+, Chrome with the unpacked extension, cloudflared 2025.4.0+ (`--token-file` support), and a domain in your Cloudflare account. Build with `npm ci` and `npm run build`.
+
+Create a remotely managed Cloudflare Tunnel and add a published application route. Keep the same tunnel and hostname when restarting its connector:
+
+| Setting | Value |
+|---|---|
+| Public hostname | A dedicated hostname, for example `threads-mcp.example.com` |
+| Origin service | `http://127.0.0.1:19759` |
+| Origin HTTP Host Header | `127.0.0.1:19759` |
+| Path | Leave empty to preserve `/mcp` and `/healthz` |
+
+Set **HTTP Host Header in the route's origin settings**. Quick Tunnel's command-line `--http-host-header` is not a substitute for this on managed ingress routes. A wrong value yields 403. Keep public TLS verification enabled. Do not place an interactive login/email challenge in front of a machine client unless it has a separately supported authentication setup.
+
+Save only the connector token (not the full Cloudflare installation command) in the private file configured by the Windows helper. Use a local editor/secure input; never put its value in commands, chat or logs. Connector token and MCP bearer are different secrets. This project does not create DNS or request Cloudflare credentials automatically.
+
+References: [managed tunnel setup](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/create-remote-tunnel/), [origin Host header](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/origin-parameters/), [token-file](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/run-parameters/).
+
+## 2. Windows login startup and supervision
+
+Use [Windows remote host commands](WINDOWS-REMOTE-HOST.md) to initialize, install, start, inspect and stop the host. One limited task starts at the current interactive user's **login**, not before login. No administrator password is stored. The supervisor starts bridge, HTTP and managed tunnel, checks their ports/health and restarts its own exited children with backoff. It never adopts or kills unrelated processes occupying these ports.
+
+After logging into Windows:
+
+1. The scheduled supervisor starts services. Open Chrome and the dedicated signed-in Threads tab.
+2. Open `http://127.0.0.1:19758/`, copy the current pairing code into the extension popup and click **連接此分頁**. Never give this code to Grok.
+3. Run the local status command. Confirm HTTP responds, bridge is connected and tunnel readiness succeeds.
+4. In Grok, call `threads_status`, then `threads_my_activity` with the expected account and `threads_get_profile` for a second read. Only these actual reads establish account access.
+
+Keep the machine awake, online and logged in. Locking the desktop differs from logging out/sleeping. Scripts do not change power policy or automatically start/recover Chrome. Repeat pairing after browser/bridge restarts. Explicit supervisor Stop persists until explicit Start; it is not treated as a crash to undo.
+
+## 3. Grok Bot command MCP
+
+Use the **command wrapper with mcp-remote --header-file**, not a literal secret-request reference inside AddMcpServer headers. The owner verified this command route in Grok Bot on 2026-11-06. Direct header injection was rejected or remained literal in that environment. This is an observed integration constraint, not a claim that every Grok API client lacks header support.
+
+[GROK-BOT.md](GROK-BOT.md) supplies a pinned command example, secure header-file instructions and acceptance prompt. Register `https://YOUR-HOSTNAME/mcp`.
+
+To migrate from Quick Tunnel: verify the managed URL, update the existing Grok command's URL argument, restart that MCP process, then perform two real reads. Disable the old registration so two clients do not drive the tab. Stop only your old Quick Tunnel process. Hostname migration does not require changing bearer, pairing code or cookies.
+
+## 4. Diagnose by layer
+
+`threads_status` returns fresh connection health without reading a page. Authenticated `GET /healthz` supplies the same bounded health plus HTTP busy state. During a long request it returns cached bridge state with its original `checkedAt`; it does not interrupt that request. Both outputs omit credentials, local paths and tab titles/URLs. No new MCP tool is added.
+
+| Evidence | Meaning and next step |
+|---|---|
+| Local 19759 does not listen | HTTP is down or failed to bind. Inspect supervisor state/log; resolve port collision without killing its owner. |
+| HTTP responds; `pairing-missing` or `host-unreachable` | Check local 19758 and bridge process. Missing pairing file alone does not prove process absence. Wait for recovery and pair the tab if needed. |
+| `extension-disconnected` | Bridge is alive without an authenticated tab. Open signed-in Chrome and pair. No HTTP/tunnel restart needed. |
+| `auth-failed` / `pairing-invalid` | Check data directory/port and running bridge's local pairing page. Never paste pairing data into chat. |
+| `connected` | Extension transport is connected; login/UI still needs a real read. |
+| Local HTTP works, tunnel /ready fails or connector exited | Tunnel/edge/network unavailable. Supervisor restarts an exited connector; a live connector can reconnect itself. |
+| Tunnel ready but public URL fails | Check DNS, route, Host header, Access policy or edge/network. /ready is not end-to-end proof. |
+| Public 401 | HTTP path reached, bearer missing/wrong. Update Grok's private header file and restart wrapper. |
+| Public 403 | Check origin Host header and Cloudflare Access. Do not disable server checks. |
+| 503 Access disabled | Bearer revoked, missing, unreadable or invalid. Restore only with intentional rotation. |
+| Public 429 | Another read is running. Honor Retry-After and avoid concurrent controllers. |
+
+An unreachable MCP cannot diagnose its own HTTP/tunnel outage from inside that failed connection. The **local status script** reports process ownership, ports, HTTP identity, bridge state, tunnel readiness and an optional anonymous public check. A listening port alone does not prove success.
+
+Short text for Grok:
+
+> Threads MCP is unreachable. Please confirm your Windows PC is awake and logged in, then run the local RemoteHost status command. If HTTP is down, inspect the supervisor; if tunnel is down, check cloudflared/network; if bridge says extension-disconnected, open the dedicated signed-in Threads tab and pair at http://127.0.0.1:19758/. For 401, update my private header file through secure input and restart this MCP. Do not send cookies, tokens or raw logs in chat. After recovery I will verify the expected account with two reads.
+
+## 5. Verify without social writes
+
+```powershell
+npm run test:http
+$env:THREADS_REMOTE_URL = 'https://threads-mcp.example.com/mcp'
+npm run test:http
+# Optional: explicitly perform two real account reads.
+$env:THREADS_HTTP_LIVE = 'true'
+npm run test:http
+Remove-Item Env:THREADS_HTTP_LIVE,Env:THREADS_REMOTE_URL
 ```
 
-Pair a dedicated Threads tab using the local page at `http://127.0.0.1:19758/`. Keep that tab out of other browser automation controllers. Then, in another terminal at the project root:
+Checks cover 15 tools, anonymous 401, disabled writes, absent write tools, /healthz and local search. A count-only report stays in the private data directory. Set the host's `THREADS_DATA_DIR` if nondefault. Transport success is separate from real account-read acceptance.
 
-```text
-node dist/cli.js serve-http
+## 6. Rotate or revoke bearer
+
+```powershell
+# Revocation persists across automatic restarts:
+node dist/cli.js remote-token revoke
+# Intentionally create a replacement; never printed:
+node dist/cli.js remote-token rotate
 ```
 
-It binds only to `127.0.0.1:19759`. Override the port with `THREADS_HTTP_PORT`. It attaches to the existing local bridge and does not start, replace or expose that bridge. The remote token is generated once at `.threads-data/remote-access.token` (or `THREADS_DATA_DIR`). Restrict this private directory to your own OS account, especially on Windows where POSIX file modes do not configure ACLs.
+The file is `remote-access.token` under `THREADS_DATA_DIR` or `.threads-data`. Once the upgraded host initializes `remote-access.initialized`, deleting only the token also revokes across restarts. Keep the marker; use explicit rotate to recover. Legacy installations without the marker should use `remote-token revoke` for durable revocation. In-flight reads are not cancelled by revocation; stop HTTP/tunnel to interrupt access immediately.
 
-## Temporary HTTPS URL
+Apply private Windows permissions after creating a replacement, transfer it through Grok's secure input into the header file, then restart that command MCP to reload headers. Old bearer requests fail. Bridge pairing and Cloudflare connector tokens are unchanged. Never print secrets for diagnosis.
 
-For an initial connection, a Cloudflare Quick Tunnel can forward **only the remote HTTP port**:
+## Temporary debugging only: Quick Tunnel
 
 ```text
 cloudflared tunnel --url http://127.0.0.1:19759 --http-host-header 127.0.0.1:19759 --no-autoupdate
 ```
 
-The MCP URL is the generated HTTPS hostname plus `/mcp`. This implementation uses stateless Streamable HTTP with JSON responses, without SSE. The tunnel hostname is not a password: every request still needs `Authorization: Bearer <remote token>`. Browser-origin requests are rejected; this is a machine-client endpoint.
-
-Quick Tunnels have no uptime guarantee, change hostnames on restart, and stop when cloudflared stops. Use a managed tunnel and a hostname you control for a durable service. See [Cloudflare Quick Tunnels](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/).
-
-## Connect Grok Bot
-
-Ask Grok Bot to add a remote MCP by URL with bearer authentication. Enter the remote token through its secure secret form, not ordinary chat. If it requests an Authorization header, supply `Bearer ` followed by the token; if it explicitly requests only the bearer token, supply just the token. Do not use the extension pairing token.
-
-[Grok Bot supports URL and command MCP servers](https://docs.x.ai/grok-bot/computer-and-apps). For API clients, the [xAI remote MCP guide](https://docs.x.ai/developers/tools/remote-mcp) documents `server_url` and authentication headers. The API support is separate from successful configuration of a particular Grok Bot account.
-
-After connecting, require actual acceptance: list 15 tools, confirm writes are disabled, read own posts with `threads_my_activity`, confirm the expected account, then read that profile again. Merely seeing the tool list does not prove browser connectivity.
-
-## Verify, revoke and stop
-
-`npm run test:http` tests authentication and MCP negotiation against the local endpoint, without browser access. Set `THREADS_REMOTE_URL` to the HTTPS MCP URL to test through the tunnel. Set `THREADS_HTTP_LIVE=true` for two real account reads. The test writes only a private, count-only report, never tokens or post text.
-
-Remote requests run one at a time; a concurrent request receives 429 with Retry-After. Do not run a second controller on the same browser tab during a research call.
-
-Stop cloudflared to remove external access. Stop `serve-http` to remove the local remote endpoint. Removing or changing `remote-access.token` immediately revokes the old token on the next request; it does not cancel an already running read. The server never recreates a removed token while running. Restarting `serve-http` creates a replacement if the file is absent. The bridge and Chrome may continue running independently. Sleep, a restart, Chrome closure or extension disconnect interrupts live reads.
+Use the printed HTTPS hostname plus /mcp. It changes on restart and has no uptime guarantee. The supervisor does not automatically create Quick Tunnels or change Grok URLs. [Cloudflare's limits](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/) also exclude SSE; this server uses JSON responses. Manual debug hosts can still run `node dist/cli.js bridge` and `node dist/cli.js serve-http`; do not run duplicates alongside supervision.

@@ -2,9 +2,87 @@
 
 This repository supports local **stdio MCP** and an opt-in authenticated **read-only HTTP MCP** endpoint. A GitHub URL supplies source code; it is not itself an MCP endpoint.
 
-To use the owner's existing Threads login without moving cookies, follow [Remote MCP](REMOTE-MCP.md). Grok Bot connects to the owner's HTTPS `/mcp` URL using an independent bearer token entered through a secure secret form. The remaining instructions below describe the alternative: installing and signing in on Grok Bot's own computer.
+To use the owner's existing Threads login without moving cookies, follow [Remote MCP](REMOTE-MCP.md) and the command wrapper below. The owner verified this route in Grok Bot on 2026-11-06. Directly inserting a secret-request value into AddMcpServer headers was rejected or remained a literal reference in that environment. Registering such a reference does not prove authentication.
 
 Official reference, checked 2026-11-06: [Grok Bot computer and apps](https://docs.x.ai/grok-bot/computer-and-apps).
+
+## Recommended: command wrapper to the owner's fixed HTTPS URL
+
+Use a managed tunnel hostname. Grok's computer does not need Chrome or Threads login for this route. The bearer can read allowed personal activity; enter it through secure input into a private header file, never ordinary chat or MCP registration arguments.
+
+Install and pin the wrapper once on Grok's computer (Node.js 24+):
+
+```sh
+mkdir -p "$HOME/.local/share/threads-mcp-client"
+cd "$HOME/.local/share/threads-mcp-client"
+npm install --save-exact mcp-remote@0.16.1
+```
+
+Keep an already verified installation; do not silently upgrade it. The pin was checked against npm metadata/readme on 2026-11-06. This is the project's recommended integration using [mcp-remote's header-file feature](https://github.com/punkpeye/mcp-remote#custom-headers), not an xAI endorsement. Header files contain one `Name: value` per line, not JSON.
+
+Have secure input write a private file containing one Authorization header with the Bearer scheme and entered remote token. If that flow cannot write safely, take over the computer and use a masked prompt. Do not pass secret-request references as literal header values or display the file. Restrict the directory to mode 700 and file to 600 on Linux. This user-operated terminal helper avoids displaying the token or putting it in shell history:
+
+```sh
+python3 -c 'import getpass,os,pathlib; p=pathlib.Path.home()/".config/threads-mcp/headers.txt"; p.parent.mkdir(parents=True,exist_ok=True,mode=0o700); os.chmod(p.parent,0o700); t=getpass.getpass("Remote MCP bearer (hidden): ").strip(); assert t and "\n" not in t and "\r" not in t; fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600); os.fchmod(fd,0o600); f=os.fdopen(fd,"w"); f.write("Authorization: Bearer "+t+"\n"); f.close()'
+```
+
+Register these nonsecret fields. Replace the absolute paths and hostname; JSON does not guarantee expansion of `~`, `$HOME` or secret placeholders:
+
+```json
+{
+  "mcpServers": {
+    "threads": {
+      "command": "node",
+      "args": [
+        "/absolute/path/to/threads-mcp-client/node_modules/mcp-remote/dist/proxy.js",
+        "https://threads-mcp.example.com/mcp",
+        "--header-file", "/absolute/path/to/.config/threads-mcp/headers.txt",
+        "--transport", "http-only",
+        "--silent"
+      ]
+    }
+  }
+}
+```
+
+The path may be registered; file contents must not be. Keep `--debug` off because authentication diagnostics can contain sensitive context. Avoid downloading `@latest` on every startup. Restart the command MCP after changing hostname or file; do not assume a running wrapper reloads headers. For 401, repair the header file rather than copying cookies or switching to OAuth.
+
+For migration from Quick Tunnel, change the existing command's URL argument, restart and verify two reads; disable its old duplicate registration. Hostname changes do not require a new bearer.
+
+Acceptance prompt (replace the hostname and expected handle, no secrets):
+
+```text
+Connect the existing Threads command MCP through mcp-remote and its private header file to https://threads-mcp.example.com/mcp. Do not put the bearer in chat or AddMcpServer arguments/headers; use the private file created through secure input.
+List tools: expect 15 structured read tools. Call threads_status, inspect fresh health and writesEnabled=false. Call threads_my_activity with kind=posts, rounds=0 and expectedAccount=my_handle, then threads_get_profile with username=my_handle and rounds=0. Report success only after both actual reads. Results are partial observations.
+If unreachable, ask me to run Windows RemoteHost status. If extension-disconnected, ask me to pair the dedicated tab locally. For 401, update the private header file through secure input and restart this MCP. Never ask for cookies, pairing code or raw logs in chat. Never enable writes to fix a read failure.
+```
+
+An unreachable server cannot diagnose its own tunnel. See [layered diagnosis](REMOTE-MCP.md#4-diagnose-by-layer). Restarting the wrapper does not establish login or recover a closed Chrome tab.
+
+## Active exploration is not limited to the already open screen
+
+The remote tools navigate to the requested source and can scroll automatically in the background. The owner does not need to open each result or scroll manually. The `rounds=0` examples above are only connection acceptance, not a research limit. `rounds` adds automatic scroll/read passes; the result remains partial because Threads controls what loads.
+
+For routine research, start with a small live discovery, then expand only relevant sources:
+
+```json
+{"tool":"threads_discover","arguments":{"query":"MCP","sort":"recent","rounds":2}}
+{"tool":"threads_search","arguments":{"query":"AI agent 開發工具","queries":["MCP","AI agent"],"refresh":true,"rounds":2,"mode":"hybrid","limit":20}}
+{"tool":"threads_get_profile","arguments":{"username":"target_handle","section":"posts","rounds":3}}
+{"tool":"threads_get_replies","arguments":{"url":"https://www.threads.com/@author/post/POST_CODE","rounds":3}}
+```
+
+These objects illustrate tool calls, not an HTTP batch. Run them sequentially. `threads_search` accepts up to 10 rounds; `threads_discover` and each `threads_research` source allow up to 3. Increase a particular source's budget gradually if useful; repeated identical calls start from the top and are not continuation cursors. Use distinct keyword variants and relevant profile/reply sources rather than blindly repeating the same page. `refresh=false` deliberately searches cached observations only.
+
+Instruction to give Grok:
+
+> Proactively navigate and explore with the structured tools; do not ask me to scroll the page. Use live refresh, a few keyword variants and 1–3 automatic rounds, then inspect relevant conversations. Return provenance, observed counts and partial/unknown limits. Treat connection-test rounds=0 as a smoke test, not a research setting. Stop expanding when new unique results stop appearing or the agreed budget is reached. Never claim complete Threads history.
+
+Direct reads without scrolling are a separate research path; see [DIRECT-READ-RESEARCH.md](DIRECT-READ-RESEARCH.md). Current remote reads still use browser navigation and automatic scrolling.
+
+## Alternative: run browser and stdio on Grok's computer
+
+The following separate installation route is not needed for the remote wrapper above.
 
 ## Prerequisites
 

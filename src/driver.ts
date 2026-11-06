@@ -9,6 +9,8 @@ import { threadsUrl } from './urls.js';
 export interface BrowserDriver {
   command<T>(command: Record<string, unknown>): Promise<T>;
   status(): unknown;
+  /** Fresh transport health only; never navigates or asserts signed-in application health. */
+  refreshStatus?(): Promise<unknown>;
   close(): Promise<void>;
 }
 

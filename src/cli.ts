@@ -17,12 +17,19 @@ import {join} from 'node:path';
 
 async function main(){
   const config=getConfig();const command=process.argv[2]??'serve';
+  if(command==='remote-token'){
+    const action=process.argv[3];if(action!=='rotate'&&action!=='revoke')throw new Error('Use remote-token rotate|revoke.');
+    const {changeRemoteToken}=await import('./http-server.js');changeRemoteToken(config.dataDir,action);
+    console.log(action==='revoke'?'Remote access revoked. Existing in-flight reads are not cancelled.':'Remote token rotated in the private data directory. Update the client secure header file and restart its MCP process.');return;
+  }
   if(command==='serve-http'){
     const {ensureRemoteToken,startRemoteHttp,RemoteReadDriver}=await import('./http-server.js');
     const port=Number(process.env.THREADS_HTTP_PORT??19759);
     if(!Number.isInteger(port)||port<1||port>65535)throw new Error('Invalid THREADS_HTTP_PORT.');
     // Attach only: never replace or expose the local extension pairing host.
-    const driver=new RemoteExtensionDriver({dataDir:config.dataDir,port:Number(process.env.THREADS_BRIDGE_PORT??19758)});await driver.connect();
+    const bridgePort=Number(process.env.THREADS_BRIDGE_PORT??19758);if(!Number.isInteger(bridgePort)||bridgePort<1||bridgePort>65535||bridgePort===port)throw new Error('Invalid or conflicting bridge port.');
+    const driver=new RemoteExtensionDriver({dataDir:config.dataDir,port:bridgePort});
+    await driver.refreshStatus(); // HTTP stays available for diagnostics while the bridge is down.
     const remoteConfig={...config,writesEnabled:false,dataDir:join(config.dataDir,'remote-index')};
     const service=new ThreadsService(new RemoteReadDriver(driver),new SearchIndex(remoteConfig.dataDir),remoteConfig);
     const tokenPath=ensureRemoteToken(config.dataDir);
@@ -31,7 +38,7 @@ async function main(){
     let stopping=false;const stop=async()=>{if(stopping)return;stopping=true;http.close();http.closeAllConnections();await service.close();process.exit(0);};
     process.once('SIGINT',stop);process.once('SIGTERM',stop);return;
   }
-  if(command==='help'||command==='--help'){console.log('Threads MCP\n  serve   Start MCP stdio server (extension by default)\n  serve-http  Start authenticated read-only HTTP endpoint (existing bridge required)\n  bridge  Start standalone extension pairing host\n  login   Open a dedicated Chrome profile\n  schedule-worker <username> [--once] [--api]  Execute authorized due jobs (selected browser by default)\nEnvironment: THREADS_PROVIDER=extension|dedicated, THREADS_DATA_DIR, THREADS_BRIDGE_PORT, THREADS_ALLOW_WRITES=true, THREADS_API_ACCESS_TOKEN, THREADS_API_USER_ID');return;}
+  if(command==='help'||command==='--help'){console.log('Threads MCP\n  serve   Start MCP stdio server (extension by default)\n  serve-http  Start authenticated read-only HTTP endpoint with dependency diagnostics\n  remote-token rotate|revoke  Manage remote bearer without printing it\n  bridge  Start standalone extension pairing host\n  login   Open a dedicated Chrome profile\n  schedule-worker <username> [--once] [--api]  Execute authorized due jobs (selected browser by default)\nEnvironment: THREADS_PROVIDER=extension|dedicated, THREADS_DATA_DIR, THREADS_BRIDGE_PORT, THREADS_ALLOW_WRITES=true, THREADS_API_ACCESS_TOKEN, THREADS_API_USER_ID');return;}
   if(command==='schedule-worker'){
     const accountId=process.argv[3];if(!accountId||accountId.startsWith('--'))throw new Error('schedule-worker requires an exact account ID or username.');
     if(!config.writesEnabled)throw new Error('schedule-worker requires THREADS_ALLOW_WRITES=true.');

@@ -14,6 +14,8 @@ try{
   await client.connect(new StreamableHTTPClientTransport(new URL(endpoint),{requestInit:{headers:{Authorization:`Bearer ${token}`}},reconnectionOptions:{maxRetries:0}}));
   const list=await client.listTools();assert.deepEqual(new Set(list.tools.map(x=>x.name)),REMOTE_READ_TOOLS);report.toolCount=list.tools.length;
   const status=await client.callTool({name:'threads_status',arguments:{}});assert.ok(!status.isError);assert.equal((status.structuredContent as any).writesEnabled,false);report.writesEnabled=false;
+  const health=await fetch(new URL('/healthz',endpoint),{headers:{Authorization:`Bearer ${token}`},redirect:'error',signal:AbortSignal.timeout(10000)});assert.equal(health.status,200);
+  const healthBody=await health.json() as any;assert.equal(healthBody.service,'threads-mcp-readonly');report.bridgeState=healthBody.bridge.state;report.healthRevision=healthBody.revision;
   await assert.rejects(client.callTool({name:'threads_execute_action',arguments:{}}),/not found/);report.writeToolAbsent=true;
   const search=await client.callTool({name:'threads_search',arguments:{query:'MCP',refresh:false,mode:'lexical'}});assert.ok(!search.isError);report.localSearch=true;
   if(process.env.THREADS_HTTP_LIVE==='true'){

@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
+import { createServer } from 'node:http';
 import { WebSocket } from 'ws';
 import { BridgeServer } from '../src/bridge.js';
 import { RemoteExtensionDriver } from '../src/remote-driver.js';
@@ -116,4 +117,98 @@ test('RPC command timeout is not retried and page error text is sanitized', asyn
     });
     assert.equal(requests, 2);
   } finally { await cleanup(); }
+});
+
+test('fresh health recovers bridge restart and token rotation without replaying a failed command', async () => {
+  const { dataDir, host, remote, pairing, cleanup } = await setup();
+  let replacement: BridgeServer | undefined;
+  let closing: Promise<void> | undefined;
+  let dispatched = 0;
+  try {
+    assert.deepEqual(remote.status().health, { state: 'unchecked', checkedAt: null });
+    const ws = await extension(pairing);
+    ws.on('message', data => {
+      const message = JSON.parse(String(data)); if (!message.command) return;
+      dispatched++;
+      // Close the actual bridge after accepting the command, before any browser reply.
+      closing = host.close();
+    });
+    await assert.rejects(remote.command({ type: 'interact', snapshotId: 's', ref: 'r', verb: 'click' }), { code: 'BRIDGE_DISCONNECTED' });
+    await closing;
+    assert.equal(dispatched, 1);
+    assert.equal((await remote.refreshStatus()).connected, false);
+    assert.equal((remote.status().health as any).state, 'pairing-missing');
+
+    replacement = new BridgeServer({ dataDir, port: pairing.port, commandTimeoutMs: 1000 });
+    await replacement.start();
+    const nextPairing = JSON.parse(readFileSync(join(dataDir, 'bridge-pairing.json'), 'utf8'));
+    assert.notEqual(nextPairing.token, pairing.token);
+    assert.equal((await remote.refreshStatus()).connected, false);
+    assert.equal((remote.status().health as any).state, 'extension-disconnected');
+    await assert.rejects(remote.command({ type: 'read' }), { code: 'BRIDGE_NOT_CONNECTED' });
+    assert.equal(dispatched, 1);
+    const nextWs = await extension(nextPairing);
+    const kinds: string[] = [];
+    nextWs.on('message', data => {
+      const message = JSON.parse(String(data)); if (!message.command) return;
+      dispatched++; kinds.push(message.command.type);
+      nextWs.send(JSON.stringify({ id: message.id, result: { recovered: true } }));
+    });
+    // The same driver recovers on the next explicit read, without a connect() call.
+    assert.deepEqual(await remote.command({ type: 'read' }), { recovered: true });
+    assert.deepEqual(kinds, ['read']); assert.equal(dispatched, 2);
+    const status = await remote.refreshStatus();
+    assert.equal(status.connected, true); assert.equal((status.health as any).state, 'connected');
+    assert.ok(Number.isFinite(Date.parse((status.health as any).checkedAt)));
+    assert.equal(dispatched, 2, 'health must not send any browser command');
+    assert.ok(!JSON.stringify(status).includes(nextPairing.token));
+    await remote.close(); assert.equal((remote.status().health as any).state, 'closed');
+    assert.equal(replacement.status().connected, true, 'closing the client preserves the paired extension');
+  } finally { await closing; await replacement?.close(); await cleanup(); }
+});
+
+test('refresh health clears stale identity and distinguishes missing pairing, auth failure and unreachable host', async () => {
+  const { dataDir, host, remote, pairing, cleanup } = await setup();
+  try {
+    await extension(pairing); await remote.connect(); assert.equal(remote.status().connected, true);
+    writeFileSync(join(dataDir, 'bridge-pairing.json'), JSON.stringify({ ...pairing, token: '0'.repeat(64) }));
+    const unauthorized = await remote.refreshStatus();
+    assert.equal((unauthorized.health as any).state, 'auth-failed');
+    assert.equal(unauthorized.connected, false); assert.equal(unauthorized.tab, null);
+    assert.equal((unauthorized.health as any).errorCode, 'BRIDGE_AUTH_FAILED');
+    writeFileSync(join(dataDir, 'bridge-pairing.json'), 'broken');
+    assert.equal(((await remote.refreshStatus()).health as any).state, 'pairing-invalid');
+    writeFileSync(join(dataDir, 'bridge-pairing.json'), JSON.stringify(pairing));
+    await host.close();
+    assert.equal(((await remote.refreshStatus()).health as any).state, 'pairing-missing');
+    writeFileSync(join(dataDir, 'bridge-pairing.json'), JSON.stringify(pairing));
+    const unavailable = await remote.refreshStatus();
+    assert.equal((unavailable.health as any).state, 'host-unreachable');
+    assert.equal((unavailable.health as any).errorCode, 'ECONNREFUSED');
+    assert.ok(!JSON.stringify(unavailable).includes(pairing.token));
+  } finally { await cleanup(); }
+});
+
+test('health timeout is bounded, emits no browser command and never substitutes stale success', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'threads-health-timeout-'));
+  const requests: string[] = [];
+  const host = createServer((req, res) => {
+    requests.push(req.url!);
+    res.writeHead(200, { 'Content-Type': 'application/json' }); res.write('{'); // Headers arrive; body never completes.
+  });
+  await new Promise<void>(resolve => host.listen(0, '127.0.0.1', resolve));
+  const port = (host.address() as { port: number }).port;
+  writeFileSync(join(dataDir, 'bridge-pairing.json'), JSON.stringify({ port, token: 'a'.repeat(64) }));
+  const remote = new RemoteExtensionDriver({ dataDir, healthTimeoutMs: 40 });
+  try {
+    const status = await remote.refreshStatus();
+    assert.equal((status.health as any).state, 'host-unreachable');
+    assert.equal((status.health as any).errorCode, 'BRIDGE_HEALTH_TIMEOUT');
+    assert.equal(status.connected, false);
+    await assert.rejects(remote.command({ type: 'read' }), { code: 'BRIDGE_HEALTH_TIMEOUT' });
+    assert.deepEqual(requests, ['/status', '/status']);
+  } finally {
+    await remote.close(); host.closeAllConnections(); await new Promise<void>(resolve => host.close(() => resolve()));
+    rmSync(dataDir, { recursive: true, force: true });
+  }
 });
