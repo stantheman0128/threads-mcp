@@ -1,0 +1,41 @@
+{
+  "name": "@stan/threads-mcp",
+  "version": "0.4.2",
+  "private": true,
+  "type": "module",
+  "description": "Local Threads MCP with browser tools, provenance and multilingual semantic search",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "bin": {
+    "stan-threads-mcp": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/build-browser.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/cli.js serve",
+    "dev": "tsx src/cli.ts serve",
+    "login": "tsx src/cli.ts login",
+    "bridge": "tsx src/cli.ts bridge",
+    "test": "tsx --test tests/*.test.ts",
+    "test:live": "tsx scripts/live-smoke.ts",
+    "test:background": "tsx scripts/background-smoke.ts",
+    "test:browser": "tsx scripts/browser-completion-smoke.ts",
+    "test:mcp": "tsx scripts/mcp-smoke.ts"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "4.3.1",
+    "@modelcontextprotocol/client": "2.3.1",
+    "@modelcontextprotocol/server": "2.3.1",
+    "playwright": "1.64.1",
+    "ws": "8.22.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5",
+    "@types/ws": "8.18.2",
+    "esbuild": "0.28.2",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2"
+  }
+}

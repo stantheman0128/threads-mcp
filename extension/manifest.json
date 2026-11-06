@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "Threads MCP 本機連接器",
+  "description": "將你選取的 Threads 分頁連接到本機 MCP。只在你按下連接後啟用，不讀取 Cookie。",
+  "version": "0.4.2",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://*.threads.com/*",
+    "https://*.threads.net/*",
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Threads MCP"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; connect-src ws://127.0.0.1:*"
+  }
+}

@@ -1,0 +1,20 @@
+node_modules/
+dist/
+.threads-data/
+.env
+*.log
+artifacts/private/
+coverage/
+
+# Never publish local account state or internal acceptance records.
+.env.*
+!.env.example
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+*.pem
+*.key
+bridge-pairing.json
+docs/WORKLOG.md

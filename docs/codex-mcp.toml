@@ -1,0 +1,9 @@
+# Merge into your Codex configuration only when you want this server enabled.
+[mcp_servers.threads]
+command = "node"
+args = ["C:/path/to/threads-mcp/dist/cli.js", "serve"]
+
+[mcp_servers.threads.env]
+THREADS_PROVIDER = "extension"
+THREADS_DATA_DIR = "C:/path/to/threads-mcp/.threads-data"
+THREADS_ALLOW_WRITES = "false"
