@@ -11,7 +11,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SERVICES = ['bridge', 'http', 'tunnel'];
-const CONFIG_FIELDS = new Set(['schemaVersion', 'projectDir', 'dataDir', 'nodePath', 'cloudflaredPath', 'bridgePort', 'httpPort', 'metricsPort', 'hostname', 'tunnelTokenFile', 'tunnelEnabled', 'checkIntervalMs', 'healthTimeoutMs', 'restartBaseMs', 'restartMaxMs', 'stableResetMs', 'maxEventLogBytes']);
+const CONFIG_FIELDS = new Set(['schemaVersion', 'projectDir', 'dataDir', 'nodePath', 'cloudflaredPath', 'bridgePort', 'httpPort', 'metricsPort', 'hostname', 'tunnelTokenFile', 'tunnelEnabled', 'remoteWritesEnabled', 'checkIntervalMs', 'healthTimeoutMs', 'restartBaseMs', 'restartMaxMs', 'stableResetMs', 'maxEventLogBytes']);
 const BRIDGE_STATES = new Set(['unchecked', 'connected', 'extension-disconnected', 'host-unreachable', 'pairing-missing', 'auth-failed', 'pairing-invalid', 'closed']);
 const fail = code => { const error = new Error(code); error.code = code; throw error; };
 const sleep = ms => new Promise(resolvePromise => setTimeout(resolvePromise, ms));
@@ -31,6 +31,7 @@ export function validateConfig(input, configPath) {
   if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !CONFIG_FIELDS.has(key))) fail('CONFIG_INVALID');
   if (input.schemaVersion !== 1 || !['projectDir', 'dataDir', 'nodePath', 'tunnelTokenFile'].every(key => safePath(input[key]))) fail('CONFIG_INVALID');
   if (typeof input.tunnelEnabled !== 'boolean' || typeof input.hostname !== 'string' || typeof input.cloudflaredPath !== 'string') fail('CONFIG_INVALID');
+  if (Object.hasOwn(input, 'remoteWritesEnabled') && typeof input.remoteWritesEnabled !== 'boolean') fail('CONFIG_INVALID');
   if (input.cloudflaredPath !== '' && !safePath(input.cloudflaredPath)) fail('CONFIG_INVALID');
   const stateDir = join(resolve(input.dataDir), 'remote-host');
   if (resolve(dirname(configPath)).toLowerCase() !== stateDir.toLowerCase() || dirname(resolve(input.tunnelTokenFile)).toLowerCase() !== stateDir.toLowerCase()) fail('PRIVATE_PATH_REQUIRED');
@@ -40,7 +41,7 @@ export function validateConfig(input, configPath) {
   if (input.tunnelEnabled && (!input.hostname || !input.cloudflaredPath)) fail('TUNNEL_CONFIG_INCOMPLETE');
   if (!numeric(input.checkIntervalMs, 1000, 60000) || !numeric(input.healthTimeoutMs, 5000, 15000) || !numeric(input.restartBaseMs, 500, 60000) ||
       !numeric(input.restartMaxMs, input.restartBaseMs, 600000) || !numeric(input.stableResetMs, 10000, 3600000) || !numeric(input.maxEventLogBytes, 16384, 1048576)) fail('CONFIG_INVALID');
-  return Object.freeze({ ...input, configPath: resolve(configPath), stateDir });
+  return Object.freeze({ ...input, remoteWritesEnabled: input.remoteWritesEnabled ?? false, configPath: resolve(configPath), stateDir });
 }
 
 export function childEnvironment(config, source = process.env) {
@@ -48,7 +49,7 @@ export function childEnvironment(config, source = process.env) {
   // NODE_OPTIONS, or write-enabled application settings from the invoking shell.
   const allowed = /^(SYSTEMROOT|WINDIR|PATH|PATHEXT|COMSPEC|TEMP|TMP|USERPROFILE|LOCALAPPDATA|APPDATA|PROGRAMDATA|PROGRAMFILES(?:\(X86\))?|HOMEDRIVE|HOMEPATH|SYSTEMDRIVE|NUMBER_OF_PROCESSORS|PROCESSOR_ARCHITECTURE|OS|LANG)$/i;
   const env = Object.fromEntries(Object.entries(source).filter(([key, value]) => allowed.test(key) && typeof value === 'string'));
-  return { ...env, THREADS_DATA_DIR: config.dataDir, THREADS_BRIDGE_PORT: String(config.bridgePort), THREADS_HTTP_PORT: String(config.httpPort), THREADS_PROVIDER: 'extension', THREADS_ALLOW_WRITES: 'false' };
+  return { ...env, THREADS_DATA_DIR: config.dataDir, THREADS_BRIDGE_PORT: String(config.bridgePort), THREADS_HTTP_PORT: String(config.httpPort), THREADS_PROVIDER: 'extension', THREADS_ALLOW_WRITES: 'false', THREADS_REMOTE_ALLOW_WRITES: config.remoteWritesEnabled === true ? 'true' : 'false' };
 }
 
 export function commandFor(config, service) {
@@ -127,9 +128,12 @@ export async function probeService(config, service) {
     if (result.status === 503) return { state: 'access-disabled', browserConnected: false };
     if (result.status === 401) return { state: 'auth-failed', browserConnected: false };
     const body = result.body;
-    if (result.status !== 200 || body?.service !== 'threads-mcp-readonly' || body?.revision !== 'remote-health-1' || body?.http !== 'up' || !BRIDGE_STATES.has(body?.bridge?.state) || typeof body?.browser?.connected !== 'boolean')
+    const remoteWritesEnabled = config.remoteWritesEnabled === true;
+    const expectedService = remoteWritesEnabled ? 'threads-mcp-controlled' : 'threads-mcp-readonly';
+    if (result.status !== 200 || body?.service !== expectedService || body?.revision !== 'remote-health-1' || body?.http !== 'up' || !BRIDGE_STATES.has(body?.bridge?.state) || typeof body?.browser?.connected !== 'boolean' ||
+        (body.writesEnabled !== undefined && body.writesEnabled !== remoteWritesEnabled) || (remoteWritesEnabled && body.writesEnabled !== true))
       return { state: result.code ? 'host-unreachable' : 'unexpected-response', browserConnected: false };
-    return { state: 'http-up', bridgeState: body.bridge.state, browserConnected: body.browser.connected, busy: body.busy === true, externalPath: 'not-probed' };
+    return { state: 'http-up', remoteWritesEnabled, bridgeState: body.bridge.state, browserConnected: body.browser.connected, busy: body.busy === true, externalPath: 'not-probed' };
   }
   const result = await requestStatus(`http://127.0.0.1:${config.metricsPort}/ready`, options);
   return { state: result.status === 200 ? 'edge-ready' : result.code ? 'metrics-unreachable' : 'edge-not-ready', endToEndVerified: false };
@@ -289,6 +293,7 @@ function sanitizedSnapshot(input) {
     services[service] = { process: source.process, ownership: ['owned-this-run', 'external-unmanaged', 'none'].includes(source.ownership) ? source.ownership : 'none', pid: Number.isInteger(source.pid) ? source.pid : null,
       failures: numeric(source.failures, 0, 1_000_000) ? source.failures : 0, nextStartAt: typeof source.nextStartAt === 'string' && Number.isFinite(Date.parse(source.nextStartAt)) ? new Date(source.nextStartAt).toISOString() : null,
       health: { state: healthStates.has(source.health?.state) ? source.health.state : 'unchecked', ...(typeof source.health?.browserConnected === 'boolean' ? { browserConnected: source.health.browserConnected } : {}),
+        ...(typeof source.health?.remoteWritesEnabled === 'boolean' ? { remoteWritesEnabled: source.health.remoteWritesEnabled } : {}),
         ...(BRIDGE_STATES.has(source.health?.bridgeState) ? { bridgeState: source.health.bridgeState } : {}), ...(typeof source.health?.busy === 'boolean' ? { busy: source.health.busy } : {}) } };
   }
   return { schemaVersion: 1, runId: input.runId, supervisorPid: input.supervisorPid, updatedAt: new Date(input.updatedAt).toISOString(), stopping: input.stopping === true, services };
@@ -304,7 +309,7 @@ export async function diagnose(config, { checkPublic = false } = {}) {
   const probes = Object.fromEntries(await Promise.all(SERVICES.map(async service => [service, service === 'tunnel' && !config.tunnelEnabled ? { state: 'disabled' } : await probeService(config, service)])));
   const ports = Object.fromEntries(await Promise.all([['bridge', config.bridgePort], ['http', config.httpPort], ['metrics', config.metricsPort]].map(async ([name, port]) => [name, await probePort(port)])));
   return { schemaVersion: 1, checkedAt: new Date().toISOString(), ports, supervisor: { running, stoppedByRequest: await exists(join(config.stateDir, 'stopped.json')), snapshotFresh: running && !!saved && Date.now() - Date.parse(saved.updatedAt) < Math.max(30000, config.checkIntervalMs * 4), snapshotProcessIdentityVerified: false, snapshot: saved },
-    config: { bridgePort: config.bridgePort, httpPort: config.httpPort, metricsPort: config.metricsPort, tunnelEnabled: config.tunnelEnabled, hostname: config.hostname, expectedManagedOrigin: `http://127.0.0.1:${config.httpPort}`, expectedOriginHostHeader: `127.0.0.1:${config.httpPort}`, managedIngressVerified: false },
+    config: { bridgePort: config.bridgePort, httpPort: config.httpPort, metricsPort: config.metricsPort, tunnelEnabled: config.tunnelEnabled, remoteWritesEnabled: config.remoteWritesEnabled === true, hostname: config.hostname, expectedManagedOrigin: `http://127.0.0.1:${config.httpPort}`, expectedOriginHostHeader: `127.0.0.1:${config.httpPort}`, managedIngressVerified: false },
     health: probes, ...(checkPublic ? { publicAnonymous: await publicAnonymousProbe(config) } : { publicAnonymous: { state: 'not-probed', authenticatedReadVerified: false } }) };
 }
 
@@ -351,7 +356,7 @@ async function main() {
   const [action, flag, path, optional] = process.argv.slice(2);
   if (!['validate', 'run', 'status', 'stop', 'resume'].includes(action) || flag !== '--config' || !path || (optional !== undefined && optional !== '--check-public')) fail('USAGE_INVALID');
   const config = await loadConfig(path);
-  if (action === 'validate') { await assertFiles(config); console.log(JSON.stringify({ valid: true, tunnelEnabled: config.tunnelEnabled, tunnelTokenFilePresent: await exists(config.tunnelTokenFile) })); return; }
+  if (action === 'validate') { await assertFiles(config); console.log(JSON.stringify({ valid: true, tunnelEnabled: config.tunnelEnabled, remoteWritesEnabled: config.remoteWritesEnabled, tunnelTokenFilePresent: await exists(config.tunnelTokenFile) })); return; }
   if (action === 'status') { console.log(JSON.stringify(await diagnose(config, { checkPublic: optional === '--check-public' }), null, 2)); return; }
   if (action === 'stop') { await atomicJson(join(config.stateDir, 'stopped.json'), { schemaVersion: 1, requestedAt: new Date().toISOString() }); console.log(JSON.stringify({ stopRequested: true, persistent: true })); return; }
   if (action === 'resume') { await assertStartPrerequisites(config); try { await unlink(join(config.stateDir, 'stopped.json')); } catch (error) { if (error.code !== 'ENOENT') throw error; } console.log(JSON.stringify({ stopRequestCleared: true })); return; }

@@ -9,10 +9,10 @@ import {once} from 'node:events';
 import {BridgeServer} from '../src/bridge.js';
 
 async function freePort(){const listener=createServer();listener.listen(0,'127.0.0.1');await once(listener,'listening');const port=(listener.address() as any).port;await new Promise<void>(r=>listener.close(()=>r()));return port as number;}
-test('serve-http CLI starts without bridge and reports fresh state when bridge subsequently appears',async()=>{
+for(const controlledWrites of [false,true])test('serve-http CLI starts without bridge and reports fresh state, controlled='+controlledWrites,async()=>{
   const data=mkdtempSync(join(tmpdir(),'threads-http-cli-'));const httpPort=await freePort();let bridgePort=await freePort();while(bridgePort===httpPort)bridgePort=await freePort();
   const host=new BridgeServer({dataDir:data,port:bridgePort});
-  const child=spawn(process.execPath,['--import','tsx',resolve('src/cli.ts'),'serve-http'],{env:{...process.env,THREADS_DATA_DIR:data,THREADS_HTTP_PORT:String(httpPort),THREADS_BRIDGE_PORT:String(bridgePort),THREADS_ALLOW_WRITES:'true',THREADS_API_ACCESS_TOKEN:'',THREADS_API_USER_ID:''},stdio:'ignore',windowsHide:true});
+  const child=spawn(process.execPath,['--import','tsx',resolve('src/cli.ts'),'serve-http'],{env:{...process.env,THREADS_DATA_DIR:data,THREADS_HTTP_PORT:String(httpPort),THREADS_BRIDGE_PORT:String(bridgePort),THREADS_ALLOW_WRITES:'true',THREADS_REMOTE_ALLOW_WRITES:controlledWrites?'true':'false',THREADS_API_ACCESS_TOKEN:'',THREADS_API_USER_ID:''},stdio:'ignore',windowsHide:true});
   let childError=false;child.on('error',()=>{childError=true;});
   const stopped=once(child,'exit');
   try{
@@ -27,6 +27,6 @@ test('serve-http CLI starts without bridge and reports fresh state when bridge s
     const response=await fetch(`http://127.0.0.1:${httpPort}/healthz`,{headers:{Authorization:`Bearer ${token}`},signal:AbortSignal.timeout(5000)});
     health=await response.json();assert.equal(health.bridge.state,'extension-disconnected');assert.equal(health.browser.connected,false);
     const rpc=await fetch(`http://127.0.0.1:${httpPort}/mcp`,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json',Accept:'application/json, text/event-stream'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'threads_status',arguments:{}}})});
-    const result=(await rpc.json() as any).result.structuredContent;assert.equal(result.writesEnabled,false);assert.equal(result.tools.length,15);
+    const result=(await rpc.json() as any).result.structuredContent;assert.equal(result.writesEnabled,controlledWrites);assert.equal(result.tools.length,controlledWrites?18:15);
   }finally{child.kill();await stopped;await host.close();rmSync(data,{recursive:true,force:true});}
 });

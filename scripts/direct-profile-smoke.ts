@@ -7,6 +7,7 @@ import {RemoteExtensionDriver} from '../src/remote-driver.js';
 
 // Opt-in real-account reads only. Reports contain counts, never session data or cursors.
 const config=getConfig();
+const expectedWrites=process.env.THREADS_HTTP_EXPECT_WRITES==='true';
 const url=new URL(process.env.THREADS_REMOTE_URL??'http://127.0.0.1:19759/mcp');
 if(url.protocol!=='https:'&&!(url.protocol==='http:'&&url.hostname==='127.0.0.1'))throw Error('HTTPS or local loopback required.');
 if(url.username||url.password||url.search||url.hash)throw Error('Endpoint must not contain credentials, query or fragment.');
@@ -22,9 +23,9 @@ try{
  assert.ok(initial.viewer.username);assert.ok(!initial.composerState?.present);originalRoute=initial.url;
  const token=readFileSync(join(config.dataDir,'remote-access.token'),'utf8').trim();
  await client.connect(new StreamableHTTPClientTransport(url,{requestInit:{headers:{Authorization:`Bearer ${token}`}}}));
- const list=await client.listTools();assert.equal(list.tools.length,15);
- assert.ok(!list.tools.some(t=>/execute|browser|messages|export/.test(t.name)));
- const status=await client.callTool({name:'threads_status',arguments:{}});assert.equal((status.structuredContent as any).writesEnabled,false);
+ const list=await client.listTools();assert.equal(list.tools.length,expectedWrites?18:15);
+ assert.ok(!list.tools.some(t=>/execute_action|browser|messages|export/.test(t.name)));
+ const status=await client.callTool({name:'threads_status',arguments:{}});assert.equal((status.structuredContent as any).writesEnabled,expectedWrites);
  for(const [label,username,maxPages] of [['public-profile',target,4],['next-cycle',initial.viewer.username,3]] as const){
   const response=await client.callTool({name:'threads_get_profile',arguments:{username,provider:'direct',section:'posts',maxPages,pageSize:5}},undefined,{timeout:90000});
   if(response.isError){report.checks.push({label,toolError:response.content});throw Error('TOOL_FAILED');}const data=response.structuredContent as any;

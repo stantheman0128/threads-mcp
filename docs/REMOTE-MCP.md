@@ -1,4 +1,4 @@
-# Reliable remote read-only MCP
+# Reliable remote MCP: read-only and controlled writes
 
 Use a **Cloudflare remotely managed tunnel with a fixed hostname** for Grok Bot. Quick Tunnel is only for temporary debugging. The endpoint uses authenticated, stateless Streamable HTTP with JSON responses; cookies stay in the owner's Chrome.
 
@@ -6,9 +6,9 @@ Use a **Cloudflare remotely managed tunnel with a fixed hostname** for Grok Bot.
 
 ## Scope and recovery boundaries
 
-There are still exactly 15 remote tools: `threads_status`, `threads_search`, `threads_research`, `threads_my_activity`, `threads_find_mentions`, `threads_get_post`, `threads_get_post_activity`, `threads_get_replies`, `threads_get_profile`, `threads_get_connections`, `threads_check_relationship`, `threads_search_users`, `threads_discover`, `threads_reply_inbox`, `threads_batch_read`.
+The default read-only mode exposes exactly 15 remote tools: `threads_status`, `threads_search`, `threads_research`, `threads_my_activity`, `threads_find_mentions`, `threads_get_post`, `threads_get_post_activity`, `threads_get_replies`, `threads_get_profile`, `threads_get_connections`, `threads_check_relationship`, `threads_search_users`, `threads_discover`, `threads_reply_inbox`, `threads_batch_read`.
 
-No messages, notifications, arbitrary browser controls, social writes, media uploads, official API, drafts, schedules or filesystem export tools are registered. Writes stay disabled even if `THREADS_ALLOW_WRITES=true` is inherited. Observations use the separate `remote-index` directory. Allowed reads include liked/saved posts and personal activity; give access only to a trusted client. Results are bounded observations, not complete history.
+In default read-only mode, no messages, notifications, arbitrary browser controls, social writes, media uploads, official API, drafts, schedules or filesystem export tools are registered. Writes stay disabled even if `THREADS_ALLOW_WRITES=true` is inherited. Explicit controlled mode adds only the three named tools described below; it uses the separate `THREADS_REMOTE_ALLOW_WRITES` setting. Observations use the separate `remote-index` directory. Allowed reads include liked/saved posts and personal activity; give access only to a trusted client. Results are bounded observations, not complete history.
 
 ### Direct public-profile pagination (v0.5.0)
 
@@ -78,7 +78,7 @@ To migrate from Quick Tunnel: verify the managed URL, update the existing Grok c
 
 ## 4. Diagnose by layer
 
-`threads_status` returns fresh connection health without reading a page. Authenticated `GET /healthz` supplies the same bounded health plus HTTP busy state. During a long request it returns cached bridge state with its original `checkedAt`; it does not interrupt that request. Both outputs omit credentials, local paths and tab titles/URLs. No new MCP tool is added.
+`threads_status` returns fresh connection health without reading a page. Authenticated `GET /healthz` supplies the same bounded health plus HTTP busy state. During a long request it returns cached bridge state with its original `checkedAt`; it does not interrupt that request. Both outputs omit credentials, local paths and tab titles/URLs. Health checking adds no MCP tool; controlled-write mode separately adds three named social tools.
 
 | Evidence | Meaning and next step |
 |---|---|
@@ -134,3 +134,23 @@ cloudflared tunnel --url http://127.0.0.1:19759 --http-host-header 127.0.0.1:197
 ```
 
 Use the printed HTTPS hostname plus /mcp. It changes on restart and has no uptime guarantee. The supervisor does not automatically create Quick Tunnels or change Grok URLs. [Cloudflare's limits](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/) also exclude SSE; this server uses JSON responses. Manual debug hosts can still run `node dist/cli.js bridge` and `node dist/cli.js serve-http`; do not run duplicates alongside supervision.
+
+## Controlled remote writes (v0.5.1, explicit opt-in)
+
+The default remains 15 read tools. Enabling `THREADS_REMOTE_ALLOW_WRITES=true` for `serve-http` adds exactly three existing named capabilities: `threads_inspect_social`, `threads_prepare_social`, and `threads_execute_social`, for 18 tools total. `THREADS_ALLOW_WRITES` alone cannot enable remote writes. The selected extension/runtime v0.5.0 already supports these named actions; no extension update is required for this host-only change.
+
+```powershell
+# Apply when starting/restarting the HTTP host, with the existing bridge left running.
+$env:THREADS_REMOTE_ALLOW_WRITES = 'true'
+node dist/cli.js serve-http
+```
+
+To disable, stop only that HTTP host and restart it with the variable removed or set to `false`. A supervisor installation uses the explicit `remoteWritesEnabled` config instead; see [Windows setup](WINDOWS-REMOTE-HOST.md). Do not start duplicate listeners. Restarting HTTP invalidates preparations but preserves the existing bearer and bridge pairing.
+
+The same bearer now grants access to the enabled tools. Supported kinds are `publish`, `reply`, `quote` (text only, up to 500 characters), `like`, `unlike`, `save`, `unsave`, `repost`, `unrepost`, `follow`, and `unfollow`. Deletion, private messages, media upload/local file access, schedules, official API and arbitrary UI controls remain unavailable.
+
+Both inspect and prepare require `expectedAccount`, `kind` and `targetUrl`; text is accepted only for publication/reply/quote. Publishing uses `https://www.threads.com/`, follow operations use the exact profile URL, and post operations use the full author/post permalink. The controller checks the account and absence of drafts/dialogs before optional target navigation, checks again before staging, and preserves existing draft content. Resolve a blocked composer locally rather than overwriting it.
+
+Prepare may open a menu/composer and fill an empty draft, but never submits. Review the returned `id`, exact account/request and 90-second expiry. Execute takes only `id` and `expectedAccount`; it cannot replace the reviewed text or target. IDs survive separate HTTP requests but are consumed once, including mismatch/expiry/cooldown/uncertain execution failures. Real dispatches share an 8-second cooldown. Context/manual changes invalidate the browser preparation; bearer rotation/revocation invalidates host preparations and access is rechecked before dispatch. An already dispatched effect cannot be undone by later revocation.
+
+Enabling capabilities is not authorization to publish or interact. Execute only an effect the user specifically authorized. On `outcome-uncertain`, inspect and reconcile; never replay the execute call. A new prepare must reflect renewed specific intent, not automatic retry logic. No-op acceptance is not proof of live publication capability for every future UI state.

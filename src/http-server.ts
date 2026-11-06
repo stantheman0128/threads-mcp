@@ -9,6 +9,7 @@ import type {BrowserDriver} from './driver.js';
 import {ThreadsError} from './types.js';
 import {remoteHealth} from './remote-health.js';
 import {validateDirectProfileCommand} from './direct-profile-command.js';
+import {RemoteSocialController} from './remote-social.js';
 
 const MAX_BODY=64*1024;
 const validToken=(value:string)=>/^[A-Za-z0-9_-]{43,128}$/.test(value);
@@ -60,8 +61,20 @@ function safeReadUrl(value:unknown):boolean{
   }catch{return false;}
 }
 
-export async function startRemoteHttp(service:ThreadsService,options:{port:number;readToken:()=>string}){
-  if(service.config.writesEnabled)throw new Error('Remote HTTP requires writes disabled.');
+export async function startRemoteHttp(service:ThreadsService,options:{port:number;readToken:()=>string;controlledWrites?:boolean;socialDriver?:BrowserDriver}){
+  if(service.config.writesEnabled!==!!options.controlledWrites)throw new Error('Remote HTTP writes require explicit matching controlled mode.');
+  if(options.controlledWrites&&!options.socialDriver)throw new Error('Controlled mode requires a local context driver.');
+  let credentialEpoch:string|undefined;
+  let requestCredential:string|undefined;
+  // Check again at controller dispatch boundaries, not only HTTP request arrival.
+  const assertAccess=()=>{
+    let current:string|undefined;try{current=options.readToken();}catch{}
+    if(!current||!validToken(current)||current!==credentialEpoch||current!==requestCredential){
+      social?.invalidatePrepared();
+      throw new ThreadsError('ACCESS_CHANGED','Remote credentials changed; preparation is invalid.');
+    }
+  };
+  const social=options.controlledWrites?new RemoteSocialController(service,options.socialDriver!,assertAccess):undefined;
   if(!Number.isInteger(options.port)||options.port<0||options.port>65535)throw new Error('Invalid remote HTTP port.');
   // A revoked/missing token leaves HTTP alive but fails closed, even under a supervisor.
   let busy=false;
@@ -71,9 +84,10 @@ export async function startRemoteHttp(service:ThreadsService,options:{port:numbe
     // cloudflared must override Host to this exact loopback authority. No browser origins/CORS.
     const address=http.address();const port=typeof address==='object'&&address?address.port:options.port;
     if(req.headers.host!==`127.0.0.1:${port}`||req.headers.origin||req.headers['sec-fetch-site']==='cross-site'){send(res,403,'Forbidden');return;}
-    let token:string;try{token=options.readToken();}catch{send(res,503,'Access disabled');return;}
+    let token:string;try{token=options.readToken();}catch{social?.invalidatePrepared();credentialEpoch=undefined;send(res,503,'Access disabled');return;}
+    if(credentialEpoch!==token){social?.invalidatePrepared();credentialEpoch=token;}
     const auth=req.headers.authorization??'';const expected=`Bearer ${token}`;
-    if(!validToken(token)){send(res,503,'Access disabled');return;}
+    if(!validToken(token)){social?.invalidatePrepared();send(res,503,'Access disabled');return;}
     if(Buffer.byteLength(auth)!==Buffer.byteLength(expected)||!timingSafeEqual(Buffer.from(auth),Buffer.from(expected))){
       res.setHeader('WWW-Authenticate','Bearer realm="threads-mcp"');send(res,401,'Unauthorized');return;
     }
@@ -86,7 +100,7 @@ export async function startRemoteHttp(service:ThreadsService,options:{port:numbe
     if(Number(req.headers['content-length']??0)>MAX_BODY){send(res,413,'Request too large');return;}
     if(busy){res.setHeader('Retry-After','3');send(res,429,'Another remote read is in progress');return;}
     // Held through response-body completion, across all nested research operations.
-    busy=true;let server:ReturnType<typeof createServer>|undefined;
+    busy=true;requestCredential=token;let server:ReturnType<typeof createServer>|undefined;
     try{
       const chunks:Buffer[]=[];let bytes=0;
       for await(const chunk of req){const b=Buffer.from(chunk);bytes+=b.length;if(bytes>MAX_BODY){send(res,413,'Request too large');return;}chunks.push(b);}
@@ -94,7 +108,10 @@ export async function startRemoteHttp(service:ThreadsService,options:{port:numbe
       try{parsed=JSON.parse(body);}catch{send(res,400,'Invalid JSON');return;}
       // MCP JSON-RPC batches would introduce concurrent browser operations within one request.
       if(!parsed||typeof parsed!=='object'||Array.isArray(parsed)){send(res,400,'One MCP message per request is required');return;}
-      server=createServer(service,{remoteReadOnly:true});
+      // A slow request authenticated with A cannot inherit a later B credential epoch.
+      let currentToken:string|undefined;try{currentToken=options.readToken();}catch{}
+      if(currentToken!==token||credentialEpoch!==token){social?.invalidatePrepared();send(res,401,'Authorization changed');return;}
+      server=createServer(service,{remoteReadOnly:!social,remoteSocial:social});
       const transport=new WebStandardStreamableHTTPServerTransport({sessionIdGenerator:undefined,enableJsonResponse:true,maxRequestBodySize:MAX_BODY});
       await server.connect(transport);
       const headers=new Headers();for(const name of ['accept','content-type','mcp-protocol-version','mcp-session-id']){const v=req.headers[name];if(typeof v==='string')headers.set(name,v);}
@@ -102,10 +119,11 @@ export async function startRemoteHttp(service:ThreadsService,options:{port:numbe
       const output=Buffer.from(await response.arrayBuffer());
       res.statusCode=response.status;response.headers.forEach((v,k)=>res.setHeader(k,v));res.end(output);
     }catch{if(!res.headersSent)send(res,500,'Remote request failed');else res.end();}
-    finally{await server?.close().catch(()=>{});busy=false;}
+    finally{await server?.close().catch(()=>{});requestCredential=undefined;busy=false;}
   }
   const http=createHttpServer({maxHeaderSize:16*1024,requestTimeout:15_000,headersTimeout:10_000},(req,res)=>{void handle(req,res).catch(()=>{if(!res.headersSent)send(res,500,'Remote request failed');else res.end();});});
   http.maxConnections=16;
+  http.once('close',()=>social?.invalidatePrepared());
   await new Promise<void>((resolve,reject)=>{http.once('error',reject);http.listen(options.port,'127.0.0.1',()=>{http.off('error',reject);resolve();});});
   return http;
 }

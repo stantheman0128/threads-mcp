@@ -23,6 +23,7 @@ export class SocialActions {
   private lastWrite = -Infinity;
   private queue: Promise<unknown> = Promise.resolve();
   constructor(private driver: SocialDriver, private options: SocialOptions) {}
+  invalidatePrepared(): void { this.prepared.clear(); }
   private now() { return (this.options.now ?? Date.now)(); }
   private serial<T>(fn: () => Promise<T>) { const result = this.queue.then(fn); this.queue = result.catch(() => {}); return result; }
   private enabled() { if (!this.options.writesEnabled) throw new ThreadsError('WRITES_DISABLED', 'Enable THREADS_ALLOW_WRITES before staging or executing social actions.'); }

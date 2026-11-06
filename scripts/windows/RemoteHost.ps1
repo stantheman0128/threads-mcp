@@ -73,11 +73,12 @@ try {
             nodePath = [IO.Path]::GetFullPath($NodePath); cloudflaredPath = $CloudflaredPath
             bridgePort = 19758; httpPort = 19759; metricsPort = 19760
             hostname = $Hostname; tunnelTokenFile = $tunnelToken; tunnelEnabled = $false
+            remoteWritesEnabled = $false
             checkIntervalMs = 5000; healthTimeoutMs = 5000; restartBaseMs = 1000
             restartMaxMs = 60000; stableResetMs = 60000; maxEventLogBytes = 262144
         }
         [IO.File]::WriteAllText($Config, ($settings | ConvertTo-Json -Depth 4), $utf8)
-        @{ initialized = $true; config = $Config; tunnelEnabled = $false; taskInstalled = $false } | ConvertTo-Json -Compress
+        @{ initialized = $true; config = $Config; tunnelEnabled = $false; remoteWritesEnabled = $false; taskInstalled = $false } | ConvertTo-Json -Compress
         exit 0
     }
     if ($Action -eq 'protect-secrets') {
