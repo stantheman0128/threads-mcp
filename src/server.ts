@@ -4,14 +4,27 @@ import { ThreadsService } from './service.js';
 import { ThreadsResearch } from './research.js';
 import {registerAdvancedTools} from './advanced-tools.js';
 const rounds=z.number().int().min(0).max(10).default(1);
-export function createServer(service:ThreadsService){
+export const REMOTE_READ_TOOLS=new Set(['threads_status','threads_search','threads_research','threads_my_activity','threads_find_mentions','threads_get_post','threads_get_post_activity','threads_get_replies','threads_get_profile','threads_get_connections','threads_check_relationship','threads_search_users','threads_discover','threads_reply_inbox','threads_batch_read']);
+export function createServer(service:ThreadsService,options:{remoteReadOnly?:boolean}={}){
   const server=new McpServer({name:'stan-threads-mcp',version:'0.4.2'});
   const research=new ThreadsResearch(service);
   const filters={mode:z.enum(['lexical','semantic','hybrid']).default('hybrid'),limit:z.number().int().min(1).max(100).default(20),since:z.string().datetime().optional(),until:z.string().datetime().optional(),author:z.string().optional(),minLikes:z.number().nonnegative().optional(),excludeTerms:z.array(z.string().min(1).max(100)).max(20).optional(),onlyReplies:z.boolean().optional()};
   function tool(name:string,description:string,schema:z.ZodObject<any>,fn:(args:any)=>unknown,readOnly=true){
+    if(options.remoteReadOnly&&!REMOTE_READ_TOOLS.has(name))return;
     server.registerTool(name,{description,inputSchema:schema,annotations:{readOnlyHint:readOnly,destructiveHint:!readOnly,idempotentHint:readOnly,openWorldHint:true}},async args=>{
-      try { const result=await fn(args);const object=result as Record<string,unknown>;return {content:[{type:'text' as const,text:JSON.stringify(result)}],structuredContent:object}; }
-      catch(error){const e=error as Error&{code?:string;outcome?:string;httpStatus?:number};return {isError:true,content:[{type:'text' as const,text:JSON.stringify({error:e.code??'ERROR',message:e.message,...(e.outcome&&['not_sent','rejected','unknown'].includes(e.outcome)?{outcome:e.outcome}:{}),...(Number.isInteger(e.httpStatus)?{httpStatus:e.httpStatus}:{})})}]};}
+      try {
+        let result=await fn(args);
+        if(options.remoteReadOnly&&name==='threads_status'){
+          const status=service.status();result={browser:{connected:(status.browser as any)?.connected===true},index:status.index,writesEnabled:false,remoteReadOnly:true,tools:[...REMOTE_READ_TOOLS],scope:'Bounded structured reads through the selected local Threads tab. No messages, browser controls, API, drafts or social writes. Remote corpus is separate from the local index.'};
+        }
+        if(options.remoteReadOnly&&name==='threads_discover'){
+          const r=result as any;result={posts:r.posts,sourceUrl:r.sourceUrl,observedAt:r.observedAt,completeness:r.completeness,warnings:r.warnings};
+        }
+        const object=result as Record<string,unknown>;return {content:[{type:'text' as const,text:JSON.stringify(result)}],structuredContent:object};
+      }
+      catch(error){const e=error as Error&{code?:string;outcome?:string;httpStatus?:number};
+        if(options.remoteReadOnly){const code=typeof e.code==='string'&&/^[A-Z][A-Z0-9_]{0,63}$/.test(e.code)?e.code:'READ_FAILED';return {isError:true,content:[{type:'text' as const,text:JSON.stringify({error:code,message:'Remote read could not complete. Check the local connection and retry only the requested read.'})}]};}
+        return {isError:true,content:[{type:'text' as const,text:JSON.stringify({error:e.code??'ERROR',message:e.message,...(e.outcome&&['not_sent','rejected','unknown'].includes(e.outcome)?{outcome:e.outcome}:{}),...(Number.isInteger(e.httpStatus)?{httpStatus:e.httpStatus}:{})})}]};}
     });
   }
   tool('threads_status','Connection, local index and feature limits. Does not return pairing secrets.',z.object({}),()=>service.status());

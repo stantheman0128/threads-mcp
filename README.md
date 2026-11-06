@@ -1,5 +1,7 @@
 # Threads MCP
 
+Grok Bot 可透過獨立金鑰保護的遠端 HTTP 入口，沿用帳號持有者電腦已登入的 Threads。遠端僅開放 15 個結構化讀取工具；設定與限制見 [REMOTE-MCP.md](docs/REMOTE-MCP.md)。
+
 **Grok Bot 安裝入口：[docs/GROK-BOT.md](docs/GROK-BOT.md)**。本專案使用本機 stdio；Bot 需在自己的電腦安裝並登入 Threads。GitHub 連結不是已部署的遠端 MCP 端點。
 
 本機執行的 Threads MCP：沿用你選定的 Chrome 登入分頁，擷取可見貼文／互動資料，用本機多語 embedding 做語意與模糊搜尋，並提供草稿、媒體、準備後執行的社交操作與 optional 官方 API。v0.4.2 共 44 個 MCP 工具。Node.js 24+；已在 Windows PowerShell 驗證啟動與 stdio 協定。

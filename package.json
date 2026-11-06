@@ -21,7 +21,8 @@
     "test:live": "tsx scripts/live-smoke.ts",
     "test:background": "tsx scripts/background-smoke.ts",
     "test:browser": "tsx scripts/browser-completion-smoke.ts",
-    "test:mcp": "tsx scripts/mcp-smoke.ts"
+    "test:mcp": "tsx scripts/mcp-smoke.ts",
+    "test:http": "tsx scripts/http-smoke.ts"
   },
   "dependencies": {
     "@huggingface/transformers": "4.3.1",

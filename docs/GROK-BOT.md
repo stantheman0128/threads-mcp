@@ -1,6 +1,8 @@
 # Install with Grok Bot
 
-This repository is a local **stdio MCP server**, not a hosted MCP URL. Grok Bot documents support for custom servers started by a command on its own computer. A GitHub URL supplies the source; installation, server registration and Threads sign-in are separate steps.
+This repository supports local **stdio MCP** and an opt-in authenticated **read-only HTTP MCP** endpoint. A GitHub URL supplies source code; it is not itself an MCP endpoint.
+
+To use the owner's existing Threads login without moving cookies, follow [Remote MCP](REMOTE-MCP.md). Grok Bot connects to the owner's HTTPS `/mcp` URL using an independent bearer token entered through a secure secret form. The remaining instructions below describe the alternative: installing and signing in on Grok Bot's own computer.
 
 Official reference, checked 2026-11-06: [Grok Bot computer and apps](https://docs.x.ai/grok-bot/computer-and-apps).
 
@@ -63,7 +65,7 @@ Keep headed mode for initial verification. If the cloud computer cannot provide 
 
 Lexical search can run without downloading an embedding model. Semantic/hybrid search downloads its local model on first use; a fallback is explicitly labelled. Observed lists are partial, and a missing account in a partial list does not prove a relationship is absent.
 
-The GitHub connector can read this repository. It does not by itself install the MCP or sign in to Threads. A URL-only remote connector would require a separately designed authenticated remote transport; that is not shipped here.
+The GitHub connector can read this repository. It does not by itself install the MCP or sign in to Threads. The optional remote transport is documented in [Remote MCP](REMOTE-MCP.md); it must be started and secured on the owner's computer.
 
 ## Prompt to give your Bot
 
