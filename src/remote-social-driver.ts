@@ -6,6 +6,7 @@ import { handle } from './urls.js';
 import { ThreadsError } from './types.js';
 
 export const REMOTE_SOCIAL_KINDS = ['like','unlike','save','unsave','repost','unrepost','follow','unfollow','publish','reply','quote'] as const;
+export type RemoteMediaAuthorizer = (request: SocialRequest, expectedAccount: string) => void;
 const publication = (kind: string) => ['publish','reply','quote'].includes(kind);
 function invalid(): never { throw new ThreadsError('INVALID_INPUT', 'Use an approved social action with its exact target and supported fields.'); }
 function object(value: unknown): Record<string, unknown> {
@@ -19,9 +20,9 @@ export function remoteAccount(value: unknown): string {
   if (typeof value !== 'string' || value.length > 65) invalid();
   return handle(value);
 }
-export function checkedRemoteSocialRequest(value: unknown, inspect = false): SocialRequest {
+export function checkedRemoteSocialRequest(value: unknown, inspect = false, allowMedia = false): SocialRequest {
   const input = object(value);
-  exact(input, ['kind','targetUrl'], ['text']);
+  exact(input, ['kind','targetUrl'], allowMedia ? ['text','mediaToken'] : ['text']);
   if (typeof input.kind !== 'string' || !(REMOTE_SOCIAL_KINDS as readonly string[]).includes(input.kind) || typeof input.targetUrl !== 'string') invalid();
   let target: URL;
   try { target = new URL(input.targetUrl); } catch { return invalid(); }
@@ -33,14 +34,16 @@ export function checkedRemoteSocialRequest(value: unknown, inspect = false): Soc
       !/^\/@[A-Za-z0-9_.]{1,64}$/.test(path) : !/^\/@[A-Za-z0-9_.]{1,64}\/post\/[A-Za-z0-9_-]{1,100}$/.test(path)) invalid();
   if (publication(input.kind)) {
     if (!(inspect && input.text === undefined) && (typeof input.text !== 'string' || !input.text.trim() || Array.from(input.text).length > 500)) invalid();
-  } else if (Object.hasOwn(input, 'text')) invalid();
-  return { kind: input.kind as SocialRequest['kind'], targetUrl: target.href, ...(input.text === undefined ? {} : { text: input.text as string }) };
+  } else if (Object.hasOwn(input, 'text') || Object.hasOwn(input, 'mediaToken')) invalid();
+  if (Object.hasOwn(input, 'mediaToken') && (typeof input.mediaToken !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(input.mediaToken))) invalid();
+  return { kind: input.kind as SocialRequest['kind'], targetUrl: target.href, ...(input.text === undefined ? {} : { text: input.text as string }),
+    ...(input.mediaToken === undefined ? {} : { mediaToken: input.mediaToken as string }) };
 }
-export function checkedRemoteSocialArgs(value: unknown, inspect = false): { request: SocialRequest; expectedAccount: string } {
+export function checkedRemoteSocialArgs(value: unknown, inspect = false, allowMedia = false): { request: SocialRequest; expectedAccount: string } {
   const input = object(value);
-  exact(input, ['kind','targetUrl','expectedAccount'], ['text']);
+  exact(input, ['kind','targetUrl','expectedAccount'], allowMedia ? ['text','mediaToken'] : ['text']);
   const { expectedAccount, ...request } = input;
-  return { request: checkedRemoteSocialRequest(request, inspect), expectedAccount: remoteAccount(expectedAccount) };
+  return { request: checkedRemoteSocialRequest(request, inspect, allowMedia), expectedAccount: remoteAccount(expectedAccount) };
 }
 export function assertRemoteViewer(page: PageRead, expectedAccount: string): void {
   if (!page?.viewer?.username) throw new ThreadsError('UNKNOWN_ACCOUNT', 'A unique signed-in account is required.');
@@ -51,13 +54,19 @@ export function assertRemoteDraftSafe(page: PageRead): void {
   if (!state || state.present !== false || state.nonempty !== false || state.attachments !== false || state.ambiguous !== false)
     throw new ThreadsError('COMPOSER_BUSY', 'An absent, empty and unambiguous composer is required before remote navigation or preparation.');
 }
+export function assertRemoteMediaDraftSafe(page: PageRead): void {
+  const state = page?.composerState;
+  if (!state || state.present !== true || state.attachments !== true || state.nonempty !== false || state.ambiguous !== false)
+    throw new ThreadsError('COMPOSER_BUSY', 'Authorized media requires one attachment composer with no existing text draft.');
+}
 
 /** Narrow internal capability: reads retain their existing gate; no raw UI/media/delete commands. */
 export class RemoteSocialDriver implements BrowserDriver {
   private generation = 0;
   private expectedAccount?: string;
   private stages = new Map<string, { request: SocialRequest; account: string; committed: boolean }>();
-  constructor(private readonly base: BrowserDriver, private readonly readDriver: BrowserDriver, private readonly assertAccess: () => void = () => {}) {}
+  constructor(private readonly base: BrowserDriver, private readonly readDriver: BrowserDriver, private readonly assertAccess: () => void = () => {},
+    private readonly authorizeMedia?: RemoteMediaAuthorizer) {}
   status() { return this.readDriver.status(); }
   refreshStatus() { return this.readDriver.refreshStatus?.() ?? Promise.resolve(this.readDriver.status()); }
   close() { this.invalidatePrepared(); return this.readDriver.close(); }
@@ -85,10 +94,12 @@ export class RemoteSocialDriver implements BrowserDriver {
       this.assertGeneration(generation); assertRemoteViewer(page, expected);
       if (!sameThreadsRoute(page.url, stage.request.targetUrl)) throw new ThreadsError('TARGET_CHANGED_ROUTE', 'The selected tab left the prepared target.');
       this.assertGeneration(generation);
+      if (stage.request.mediaToken) this.authorizeMedia!(stage.request, expected);
+      this.assertGeneration(generation);
       return this.base.command<T>({ type: 'social', operation: 'commit', token: command.token, expectedAccount: expected });
     }
     exact(command, ['type','operation','request'], operation === 'inspect' ? ['token'] : []);
-    const request = checkedRemoteSocialRequest(command.request, operation === 'inspect');
+    const request = checkedRemoteSocialRequest(command.request, operation === 'inspect', !!this.authorizeMedia);
     let tokenStage: { request: SocialRequest; account: string; committed: boolean } | undefined;
     if (Object.hasOwn(command, 'token')) {
       if (typeof command.token !== 'string') invalid();
@@ -103,14 +114,20 @@ export class RemoteSocialDriver implements BrowserDriver {
     const expected = tokenStage?.account ?? this.expectedAccount;
     if (!expected) throw new ThreadsError('UNKNOWN_ACCOUNT', 'An expected account binding is required.');
     assertRemoteViewer(page, expected);
-    if (operation === 'stage') assertRemoteDraftSafe(page);
+    if (operation === 'stage') {
+      if (request.mediaToken) assertRemoteMediaDraftSafe(page); else assertRemoteDraftSafe(page);
+    }
+    this.assertGeneration(generation);
+    if (request.mediaToken && (operation === 'stage' || !tokenStage)) this.authorizeMedia!(request, expected);
     this.assertGeneration(generation);
     const result = await this.base.command<T>({ type: 'social', operation, request, ...(command.token === undefined ? {} : { token: command.token }) });
     this.assertGeneration(generation);
     if (operation === 'stage') {
+      if (request.mediaToken) this.authorizeMedia!(request, expected);
+      this.assertGeneration(generation);
       const stage = result as SocialStage;
       if (!stage || typeof stage.token !== 'string' || !stage.token || stage.token.length > 200 ||
-          JSON.stringify(checkedRemoteSocialRequest(stage.request)) !== JSON.stringify(request) || !sameThreadsRoute(stage.url, request.targetUrl))
+          JSON.stringify(checkedRemoteSocialRequest(stage.request, false, !!this.authorizeMedia)) !== JSON.stringify(request) || !sameThreadsRoute(stage.url, request.targetUrl))
         throw new ThreadsError('INVALID_ACTION', 'The browser returned an unbound social preparation.');
       const account = remoteAccount(stage.account);
       assertRemoteViewer(page, account);

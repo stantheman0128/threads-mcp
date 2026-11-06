@@ -8,8 +8,8 @@ export function directProfile(args: DirectProfileArgs) {
 }
 export {socialStage,socialCommit,socialInspect,cancelSocialActions} from './social-runtime.js';
 export {media,cancelMediaTransfers} from './media-runtime.js';
-export const runtimeVersion='0.5.0';
-export const runtimeRevision='20261106-direct-profile-1';
+export const runtimeVersion='0.6.0';
+export const runtimeRevision='20261106-remote-media-1';
 
 export interface ElementRef { ref: string; role: string; name: string; text: string; href?: string; editable: boolean; checked?: boolean; context: string; }
 export interface PageSnapshot { snapshotId: string; url: string; title: string; viewer: { username: string | null }; elements: ElementRef[]; text: string; }
@@ -17,7 +17,7 @@ export interface DialogState { present: boolean; selectedTab: string | null; bus
 export interface ComposerState {present:boolean;nonempty:boolean;attachments:boolean;ambiguous:boolean;}
 export interface PostActivityEvidence {present:boolean;targetUrl:string|null;targetCode:string|null;selectedTab:'likes'|'reposts'|'insights'|null;users:Profile[];displayedCount:number|null;counts:{likes:number|null;reposts:number|null;views:number|null};busy:boolean;warnings:string[];}
 export interface NotificationRowEvidence { text:string; actorLinks:Array<{username:string;url:string}>; postLinks:string[]; timeLabel?:string|null; timestamp?:string|null; eventId?:string|null; actionText?:string|null; additionalActorCount?:number|null; badge?:{kind:'like'|'reply'|'follow'|'unknown';signature:string|null}; }
-export interface PageRead { runtimeVersion: string; runtimeRevision?:string;runtimeDiagnostics?:ReturnType<typeof runtimeDiagnostics>;extensionVersion?: string; url: string; title: string; posts: Post[]; profiles: Profile[]; replies: Post[]; dialogUsers: Profile[]; dialogState: DialogState; composerState?:ComposerState;postActivity?:PostActivityEvidence;notificationRows?:NotificationRowEvidence[]; visibilityState?: DocumentVisibilityState; viewer: { username: string | null }; text: string; warnings: string[]; observedAt: string; }
+export interface PageRead { runtimeVersion: string; remoteMediaVersion?:number; runtimeRevision?:string;runtimeDiagnostics?:ReturnType<typeof runtimeDiagnostics>;extensionVersion?: string; url: string; title: string; posts: Post[]; profiles: Profile[]; replies: Post[]; dialogUsers: Profile[]; dialogState: DialogState; composerState?:ComposerState;postActivity?:PostActivityEvidence;notificationRows?:NotificationRowEvidence[]; visibilityState?: DocumentVisibilityState; viewer: { username: string | null }; text: string; warnings: string[]; observedAt: string; }
 let current: { id: string; url: string; expires: number; entries: Map<string,{element: HTMLElement; fingerprint: string}> } | undefined;
 function routeKey(value: string): string | null {
   try { const url=new URL(value);return `${url.origin}${url.pathname}${url.search}`; } catch { return null; }
@@ -571,5 +571,5 @@ export function readPage(): PageRead {
   const isProfileSearch=location.pathname==='/search'&&new URL(location.href).searchParams.get('filter')==='profiles';
   const profiles=new Map((documentMatches&&!isProfileSearch?parsed.profiles:[]).map(profile=>[profile.username.toLowerCase(),profile]));
   for(const profile of searchProfiles())if(!profiles.has(profile.username.toLowerCase()))profiles.set(profile.username.toLowerCase(),profile);
-  return {runtimeVersion,runtimeRevision,url:location.href,title:document.title,posts:merged,profiles:[...profiles.values()],replies,dialogUsers:dialogUsers(dialog),dialogState:readDialogState(dialog),composerState:readComposerState(),postActivity:postActivity(dialog),notificationRows:notificationRows(),visibilityState:document.visibilityState,viewer:viewer(),text:pageText,warnings,observedAt,runtimeDiagnostics:runtimeDiagnostics(dialog)};
+  return {runtimeVersion,runtimeRevision,remoteMediaVersion:1,url:location.href,title:document.title,posts:merged,profiles:[...profiles.values()],replies,dialogUsers:dialogUsers(dialog),dialogState:readDialogState(dialog),composerState:readComposerState(),postActivity:postActivity(dialog),notificationRows:notificationRows(),visibilityState:document.visibilityState,viewer:viewer(),text:pageText,warnings,observedAt,runtimeDiagnostics:runtimeDiagnostics(dialog)};
 }

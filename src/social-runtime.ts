@@ -6,6 +6,12 @@ export interface SocialRequest { kind: SocialKind; targetUrl: string; text?: str
 export interface SocialObservation { account: string; url: string; targetUrl: string; state: string; verified: boolean; evidence: string[]; postUrl?: string; }
 export interface SocialStage { token: string; account: string; url: string; request: SocialRequest; before: SocialObservation; noop: boolean; }
 interface TargetPreview { author: string; timestamp: string; body: string; }
+export interface MediaComposeRequest { kind: 'publish' | 'reply' | 'quote'; targetUrl: string; }
+/** Internal DOM binding only; never serialized through the bridge. */
+export interface MediaComposerBinding {
+  request: MediaComposeRequest; account: string; scope: HTMLElement; editor: HTMLElement;
+  targetScope?: HTMLElement; replyPreview?: { element: HTMLElement; evidence: TargetPreview };
+}
 interface Entry extends SocialStage { element?: HTMLElement; fingerprint?: string; scope?: HTMLElement; targetScope?: HTMLElement; editor?: HTMLElement; replyPreview?: { element: HTMLElement; evidence: TargetPreview }; beforeUrls: Set<string>; expires: number; consumed: boolean; committedAt?: number; }
 let staged: Entry | undefined;
 let generation = 0;
@@ -301,6 +307,67 @@ function textMatches(card: HTMLElement, text: string): boolean {
   // Exact visible text node grouping; no substring match that could accept an old or different post.
   return [...card.querySelectorAll<HTMLElement>('p,[dir="auto"]')].filter(isVisible).some(el => el.innerText.replace(/\r\n/g, '\n') === text.replace(/\r\n/g, '\n'));
 }
+async function openEmptyComposer(request: SocialRequest, expectedGeneration: number, expectedAccount: string): Promise<MediaComposerBinding> {
+  const check = () => {
+    assertGeneration(expectedGeneration);
+    if (context(request).account !== expectedAccount) fail('ACCOUNT_MISMATCH', 'The account changed while opening the composer.');
+  };
+  check();
+  if (overlays().length || editors(document).some(el => editorValue(el).trim() || hasAttachments(el.parentElement!, el))) fail('EXISTING_DRAFT', 'An existing draft or dialog is present; leave it intact and resolve it manually.');
+  let targetScope: HTMLElement | undefined, expectedReply: TargetPreview | undefined;
+  if (request.kind === 'publish') {
+    only(controls(document).filter(el => /^(Create|New thread|新增|建立|新串文)$/i.test(name(el))), 'A unique new-thread control is required.').click();
+  } else {
+    const card = postCard(request.targetUrl); targetScope = card;
+    if (request.kind === 'reply') {
+      expectedReply = targetEvidence(card, request.targetUrl);
+      only(controls(card).filter(el => /^(Reply|Replied|回覆|已回覆)(?:\s*\d[\d.,]*(?:\s*[萬万億KMB])?)?$/i.test(name(el))), 'A unique Reply control in the exact target post is required.').click();
+    } else {
+      const binding = await menuFor(request, expectedGeneration); targetScope = binding.card;
+      check();
+      only(controls(binding.menu).filter(el => /^(Quote|Quote post|引用|引用貼文)$/i.test(name(el))), 'A unique Quote menu action is required.').click();
+    }
+  }
+  const scope = await waitFor(() => {
+    check();
+    const dialogs = overlays().filter(el => el.getAttribute('role') === 'dialog' && editors(el).length === 1);
+    return dialogs.length === 1 ? dialogs[0] : undefined;
+  });
+  check();
+  const editor = only(editors(scope), 'The composer needs exactly one text editor.');
+  if (editorValue(editor).trim()) fail('EXISTING_DRAFT', 'The opened composer contains a draft; it was not replaced.');
+  if (hasAttachments(scope, editor)) fail('EXISTING_MEDIA', 'Existing composer media was not authorized.');
+  let replyPreview: MediaComposerBinding['replyPreview'];
+  if (request.kind !== 'publish' && !links(scope).some(link => link.url === request.targetUrl)) {
+    const preview = request.kind === 'reply' ? matchingReplyPreview(scope, editor, request.targetUrl, expectedReply) : undefined;
+    if (!preview || !expectedReply) fail('TARGET_UNVERIFIED', 'The composer needs an exact target permalink or a reply preview matching the original post.');
+    replyPreview = { element: preview, evidence: expectedReply };
+  }
+  return { request: { kind: request.kind as MediaComposeRequest['kind'], targetUrl: request.targetUrl }, account: expectedAccount, scope, editor, targetScope, replyPreview };
+}
+/** Only opens an exact empty composer. Does not fill text, attach files or publish. */
+export async function openMediaComposer(input: MediaComposeRequest, expectedAccount: string): Promise<MediaComposerBinding> {
+  if (!input || !['publish', 'reply', 'quote'].includes(input.kind) || typeof input.targetUrl !== 'string') fail('INVALID_INPUT', 'A fixed publish, reply or quote target is required.');
+  const request = requestChecked(input, true);
+  if (context(request).account !== expectedAccount.toLowerCase()) fail('ACCOUNT_MISMATCH', 'The selected account does not match.');
+  cancelSocialActions();
+  const expectedGeneration = generation;
+  watchManualTakeover(expectedGeneration);
+  try { return await openEmptyComposer(request, expectedGeneration, expectedAccount.toLowerCase()); }
+  finally { if (generation === expectedGeneration) cancelSocialActions(); }
+}
+/** Recheck the original binding, including a source-preview-only reply, throughout upload and staging. */
+export function assertMediaComposerBinding(binding: MediaComposerBinding, request?: SocialRequest): void {
+  if (request && (request.kind !== binding.request.kind || request.targetUrl !== binding.request.targetUrl)) fail('MEDIA_TARGET_MISMATCH', 'The staged media belongs to another publication target.');
+  if (context(binding.request).account !== binding.account) fail('ACCOUNT_MISMATCH', 'The selected account changed.');
+  const { scope, editor } = binding;
+  if (overlays().length !== 1 || overlays()[0] !== scope || !isVisible(scope) || !isVisible(editor) || !scope.contains(editor) || editors(scope).length !== 1 || editors(scope)[0] !== editor)
+    fail('MEDIA_COMPOSER_CHANGED', 'The original media composer changed.');
+  if (binding.request.kind !== 'publish' && !links(scope).some(link => link.url === binding.request.targetUrl)) {
+    if (!binding.targetScope?.isConnected || !binding.replyPreview || matchingReplyPreview(scope, editor, binding.request.targetUrl, binding.replyPreview.evidence) !== binding.replyPreview.element)
+      fail('TARGET_CHANGED', 'The original reply preview or quote target changed.');
+  }
+}
 export async function socialStage(input: SocialRequest): Promise<SocialStage> {
   const request = requestChecked(input); const ctx = context(request);
   cancelSocialActions();
@@ -314,23 +381,16 @@ export async function socialStage(input: SocialRequest): Promise<SocialStage> {
   if (isCompose) {
     if (request.mediaToken) {
       scope = only(overlays().filter(el => el.getAttribute('role') === 'dialog'), 'Approved media must be in exactly one composer dialog.');
-      assertApprovedMedia(request.mediaToken, scope);
+      const binding = assertApprovedMedia(request.mediaToken, scope);
+      if (binding) {
+        assertMediaComposerBinding(binding, request);
+        targetScope = binding.targetScope; replyPreview = binding.replyPreview;
+        expectedReply = binding.replyPreview?.evidence;
+      }
     } else {
-      if (overlays().length || editors(document).some(el => editorValue(el).trim())) fail('EXISTING_DRAFT', 'An existing draft or dialog is present; leave it intact and resolve it manually.');
-      if (request.kind === 'publish') {
-      only(controls(document).filter(el => /^(Create|New thread|新增|建立|新串文)$/i.test(name(el))), 'A unique new-thread control is required.').click();
-      } else {
-      const card = postCard(request.targetUrl); targetScope = card;
-      if (request.kind === 'reply') expectedReply = targetEvidence(card, request.targetUrl);
-      if (request.kind === 'reply') only(controls(card).filter(el => /^(Reply|Replied|回覆|已回覆)(?:\s*\d[\d.,]*(?:\s*[萬万億KMB])?)?$/i.test(name(el))), 'A unique Reply control in the exact target post is required.').click();
-      else {
-        const binding = await menuFor(request, expectedGeneration); targetScope = binding.card;
-        const menu = binding.menu;
-        assertGeneration(expectedGeneration);
-        only(controls(menu).filter(el => /^(Quote|Quote post|引用|引用貼文)$/i.test(name(el))), 'A unique Quote menu action is required.').click();
-      }
-      }
-      scope = await waitFor(() => { assertGeneration(expectedGeneration); const ds = overlays().filter(el => el.getAttribute('role') === 'dialog' && editors(el).length === 1); return ds.length === 1 ? ds[0] : undefined; });
+      const binding = await openEmptyComposer(request, expectedGeneration, ctx.account);
+      scope = binding.scope; targetScope = binding.targetScope; replyPreview = binding.replyPreview;
+      expectedReply = binding.replyPreview?.evidence;
     }
     assertGeneration(expectedGeneration);
     context(request); editor = only(editors(scope), 'The composer needs exactly one text editor.');

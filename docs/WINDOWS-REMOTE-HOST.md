@@ -13,7 +13,7 @@ npm run build
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\RemoteHost.ps1 -Action init -Hostname threads-mcp.example.com
 ```
 
-The default configuration is `.threads-data/remote-host/config.json`. `init` does not create credentials, start services or enable the tunnel. It writes `remoteWritesEnabled:false`, so remote access starts read-only. Existing schema-version-1 configurations without that field also default to false. It locates Node/cloudflared; use `-NodePath` and `-CloudflaredPath` if needed. Paths with spaces are passed as arguments, not composed shell commands. Configuration can be inspected safely but should remain in the private directory.
+The default configuration is `.threads-data/remote-host/config.json`. `init` does not create credentials, start services or enable the tunnel. It writes `remoteWritesEnabled:false` and `remoteMediaEnabled:false`, so remote access starts read-only with media disabled. Existing schema-version-1 configurations without these fields also default to false. It locates Node/cloudflared; use `-NodePath` and `-CloudflaredPath` if needed. Paths with spaces are passed as arguments, not composed shell commands. Configuration can be inspected safely but should remain in the private directory.
 
 3. Save the Cloudflare connector token into `.threads-data/remote-host/tunnel.token` using a local editor. Paste only the token, not the full installation command. Do not type it into the terminal command line or share it in chat. This secret is separate from the existing MCP bearer.
 4. **Keep an existing `remote-access.token`** to preserve Grok's current authentication. For a genuinely new installation without either a token or a revocation marker, generate the first bearer without printing it:
@@ -68,20 +68,32 @@ Logs are under the configured private state directory (by default `.threads-data
 
 Raw child stdout/stderr is not persisted, because third-party startup/debug output can contain secrets. Events report safe error categories/exit status, not headers, token files, cookies or full command lines. A stale status file is not evidence of a running supervisor; the live status command also probes current state.
 
-## Optional controlled remote writes
+## Optional controlled remote writes and media
 
-`remoteWritesEnabled` is an optional JSON **boolean**, defaulting to `false`. Strings such as `"true"`, null and other types are rejected; unknown configuration fields are still rejected. Enabling it changes the remote security mode from **15 read-only tools** to **18 tools with controlled writes**. The additional write workflow still requires its prepared-action and authorization checks; this setting alone is not authorization to perform a particular social action. Give the remote bearer only to clients trusted for the enabled mode.
+`remoteWritesEnabled` and `remoteMediaEnabled` are optional JSON **booleans**, each defaulting to `false`. Strings such as `"true"`, null and other types are rejected; unknown configuration fields are still rejected. Media requires both opt-ins: `remoteMediaEnabled:true` with omitted or false `remoteWritesEnabled` is invalid.
 
-The supervisor derives `THREADS_REMOTE_ALLOW_WRITES=true` only from `remoteWritesEnabled:true`. It always sets the broader `THREADS_ALLOW_WRITES=false`; neither write setting is inherited from the launching shell. Setting an environment variable in a parent terminal cannot override a read-only supervisor configuration.
+| `remoteWritesEnabled` | `remoteMediaEnabled` | Remote security mode |
+| --- | --- | --- |
+| `false` | `false` | **15 read-only tools** |
+| `true` | `false` | **18 tools**: 15 reads plus 3 controlled social-action tools |
+| `true` | `true` | **19 tools**: controlled mode plus `threads_stage_media_remote`, one tool with multiple operations |
+| `false` | `true` | Rejected configuration |
 
-To intentionally change mode, stop the current supervisor first, update the private config, validate, then explicitly start it. The following example enables controlled writes; use `$false` instead to return to read-only mode. It preserves other settings and adds the optional field to older files:
+The write/media workflow still requires its prepared-action and authorization checks; these settings alone do not authorize a particular upload or social action. Give the remote bearer only to clients trusted for the enabled mode.
+
+The supervisor derives `THREADS_REMOTE_ALLOW_WRITES` and `THREADS_REMOTE_ALLOW_MEDIA` solely from the validated configuration. It always sets the broader `THREADS_ALLOW_WRITES=false`; none of these settings is inherited from the launching shell. Setting an environment variable in a parent terminal cannot enable media or override a read-only supervisor configuration.
+
+To intentionally change mode, stop the current supervisor first, update the private config, validate, then explicitly start it. The example below enables controlled writes while leaving media disabled. Set both mode variables to `$true` to enable controlled media, or both to `$false` to return to read-only mode. It preserves other settings and adds the optional fields to older files:
 
 ```powershell
 $threadsConfigPath = Join-Path (Get-Location) '.threads-data/remote-host/config.json'
+$threadsRemoteWrites = $true
+$threadsRemoteMedia = $false
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\RemoteHost.ps1 -Action stop -Config $threadsConfigPath
 if ($LASTEXITCODE -ne 0) { throw 'Stop did not complete; do not continue the mode change.' }
 $threadsConfig = Get-Content -LiteralPath $threadsConfigPath -Raw | ConvertFrom-Json
-$threadsConfig | Add-Member -NotePropertyName remoteWritesEnabled -NotePropertyValue $true -Force
+$threadsConfig | Add-Member -NotePropertyName remoteWritesEnabled -NotePropertyValue $threadsRemoteWrites -Force
+$threadsConfig | Add-Member -NotePropertyName remoteMediaEnabled -NotePropertyValue $threadsRemoteMedia -Force
 $threadsConfig | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $threadsConfigPath -Encoding UTF8
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\RemoteHost.ps1 -Action validate -Config $threadsConfigPath
 if ($LASTEXITCODE -ne 0) { throw 'Validation failed; leave the supervisor stopped and correct the config.' }
@@ -93,7 +105,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\Remote
 
 Editing or validating the configuration does not clear a persistent Stop. If the host was intentionally stopped, leave it stopped until explicit resume is wanted. These steps do not reinstall the login task. A running supervisor does not hot-reload the setting, and external/unmanaged listeners remain untouched; resolve any deliberate ownership handover separately.
 
-After Start, re-pair the selected Chrome tab if the bridge restarted, then refresh the client's MCP tool schema. Confirm 15 tools for read-only mode or 18 for controlled mode. Local `validate` and `status` report the configured `remoteWritesEnabled`; a successful HTTP probe also reports the observed mode. Health accepts `threads-mcp-readonly` for the default mode or `threads-mcp-controlled` with `writesEnabled:true` for controlled mode, retaining revision `remote-health-1`. A mode mismatch is `unexpected-response`, not evidence that the requested configuration is active. Verify an actual read after recovery; do not perform a social write merely to test the toggle.
+After Start, re-pair the selected Chrome tab if the bridge restarted, then refresh the client's MCP tool schema. Confirm the expected 15, 18 or 19 tools. Local `validate` and `status` report the configured `remoteWritesEnabled` and `remoteMediaEnabled`; a successful HTTP probe also reports the observed mode. Health accepts `threads-mcp-readonly` for the default mode or `threads-mcp-controlled` with `writesEnabled:true` for controlled mode, retaining revision `remote-health-1`. Its `mediaEnabled` must match the configured media setting; an older response without that field is accepted only when media is disabled. A mode mismatch is `unexpected-response`, not evidence that the requested configuration is active. Verify an actual read after recovery; do not upload media or perform a social write merely to test the toggles.
 
 ## Stop, restart, uninstall
 

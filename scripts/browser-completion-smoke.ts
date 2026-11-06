@@ -7,14 +7,14 @@ import {getConfig} from '../src/config.js';
 // Real-account acceptance: reads plus already-satisfied action commits only.
 // A no-op preparation is checked before execution; no test changes are allowed.
 const config=getConfig();
-const client=new Client({name:'browser-completion-acceptance',version:'0.5.0'});
+const client=new Client({name:'browser-completion-acceptance',version:'0.6.0'});
 const transport=new StdioClientTransport({command:process.execPath,args:[resolve('dist/cli.js'),'serve'],env:{...process.env as Record<string,string>,THREADS_PROVIDER:'extension',THREADS_DATA_DIR:config.dataDir,THREADS_ALLOW_WRITES:'true',THREADS_API_ACCESS_TOKEN:'',THREADS_API_USER_ID:''},stderr:'pipe'});
 const report:any={status:'BLOCKED',startedAt:new Date().toISOString(),publicMutations:0,uploads:0,checks:{}};
 async function call(name:string,args:Record<string,unknown>={}){const started=Date.now();console.log(JSON.stringify({phase:'start',tool:name,time:new Date().toISOString()}));const r=await client.callTool({name,arguments:args},undefined,{timeout:180000});console.log(JSON.stringify({phase:'end',tool:name,elapsedMs:Date.now()-started,error:!!r.isError}));if(r.isError)throw new Error(JSON.stringify(r.content));return r.structuredContent as any;}
 async function check(name:string,run:()=>Promise<unknown>){let stopError:unknown;try{const result=await run();report.checks[name]={status:'PASS',result};console.log(JSON.stringify({check:name,status:'PASS',result}));}catch(error){report.checks[name]={status:'FAIL',error:String(error)};console.log(JSON.stringify({check:name,status:'FAIL',error:String(error)}));if(/NAVIGATION_TIMEOUT|COMMAND_TIMEOUT|BRIDGE_DISCONNECTED|BRIDGE_NOT_CONNECTED|Request timed out/.test(String(error)))stopError=error;}writeFileSync(join(config.dataDir,'browser-completion-smoke.json'),JSON.stringify(report,null,2));if(stopError)throw stopError;}
 try{
   await client.connect(transport);const page=await call('threads_read_page');
-  if(page.runtimeVersion!=='0.5.0'||page.extensionVersion!=='0.5.0')throw new Error(`Activation mismatch: runtime=${page.runtimeVersion}, extension=${page.extensionVersion}`);
+  if(page.runtimeVersion!=='0.6.0'||page.extensionVersion!=='0.6.0')throw new Error(`Activation mismatch: runtime=${page.runtimeVersion}, extension=${page.extensionVersion}`);
   if(process.env.THREADS_EXPECT_RUNTIME_REVISION&&page.runtimeRevision!==process.env.THREADS_EXPECT_RUNTIME_REVISION)throw new Error(`Runtime revision mismatch: ${page.runtimeRevision??'unreported'}`);
   const account=page.viewer.username;if(!account)throw new Error('No unique viewer');
   report.checks.activation={status:'PASS',runtime:page.runtimeVersion,runtimeRevision:page.runtimeRevision??null,extension:page.extensionVersion,visibility:page.visibilityState};

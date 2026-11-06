@@ -1,6 +1,6 @@
 # Verification and limits
 
-The runtime is version 0.4.2, revision `20261024-readiness-3`.
+Current source runtime: v0.6.0, revision `20261106-remote-media-1`. Dated activation results below are separate from source version.
 
 ## Public export checks (2026-11-06, Windows)
 
@@ -51,3 +51,15 @@ An initial assertion-only harness failure was retained without enough pagination
 Default suite257PASS6conditionalSKIP0FAIL; typecheck/build/44-tool stdio smoke passed. Explicit controlled mode has18tools; default remains15. Fixture coverage proves preparation across stateless HTTP requests, account/draft/target binding, expiry/single-use/shared cooldown, uncertain-outcome no replay and revocation at asynchronous dispatch boundaries. Slow request bodies cannot inherit a newer bearer epoch. Independent review closed both credential timing issues.
 
 The deployed public HTTPS endpoint reported18tools and writesEnabledtrue; anonymous requests remained401. Actual named inspect/prepare/execute acceptance used ONLY an already-satisfied action: nooptrue, dispatchedfalse, stateunchanged. Reuse of the consumed ID failed; a subsequent direct profile read returned2pages9posts and the original hidden route was restored. No social mutation, publication, deletion, media upload or private message was performed. This verifies activation and no-op safeguards, not actual publication of content. The owner's Grok process must refresh its tool schema.
+
+## v0.6.0 controlled remote media — 2026-11-06
+
+Selected client-byte uploads, with a separate remote-media opt-in. Default15/read-only and writes-only18 remain; both flags expose19 tools. No filesystem path reader, official API, delete, DM, generic UI or port19758 exposure was added. Host uploads use generated private filenames, strict chunk/size/signature/hash limits and durable consumed-finish receipts.
+
+Default suite: **279 passed,8 conditional/browser/proxy skips,0 failed**, finalexit0. Typecheck,build and44-tool stdio smoke passed. Focused core10/social19/Windows11 tests passed. The isolatedChrome affected suite passed25 tests; the final PNG fixture was corrected to valid CRCs and explicitly required successful image decoding. It verified exact bytes in the File input, visible preview, text/media preparation and one commit for publish/reply/quote. All test-browser network traffic was intercepted. The separately enabled actualmcp-remote0.16.1/header-file HTTP fixture passed5 tests, including byte transfer, prepare→reviewID→single dispatch, status after uncertain finish,429/health behavior and revocation before file assignment. Independent source/contract review found no blocker.
+
+The browser verifier deliberately cannot match uploaded bytes to platform-rendered media: an observed exact-caption post with media remains publication-observed-media-unverified/outcome-uncertain. No automatic retry is authorized. Fixture execution is not real-account publication verification.
+
+The current publicHTTPS host was restarted with both flags and returned19 tools,writesEnabledtrue,mediaEnabledtrue,anonymous401 and connected bridge. The extension/runtime v0.6.0 build is ready; selected-tab reload/reconnection and fresh runtime-capability acceptance remain pending. No real-account media upload or publication was performed. Grok must reconnect/refresh its schema; the maintainer has not controlled the owner's Grok process. Windows supervisor supports the new default-false flag, but no login task or persistent configuration was installed.
+
+An initial CLI fixture startup timeout and observation-navigation cascade were retained as transient test failures; isolated reruns passed3/3 and26/26 on the same source. Guardian's wrapper reported WinError5 and its own fallback; successful local tests do not prove Guardian job coverage.

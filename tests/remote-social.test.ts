@@ -10,7 +10,7 @@ import type { SearchIndex } from '../src/search.js';
 import type { SocialRequest, SocialStage } from '../src/social-actions.js';
 import { ThreadsService } from '../src/service.js';
 import { ThreadsError } from '../src/types.js';
-import { RemoteSocialController, REMOTE_SOCIAL_KINDS } from '../src/remote-social.js';
+import { RemoteSocialController, REMOTE_SOCIAL_KINDS, type RemoteMediaAuthorizer } from '../src/remote-social.js';
 import { RemoteSocialDriver } from '../src/remote-social-driver.js';
 
 const target = 'https://www.threads.com/@writer/post/EXACT';
@@ -57,7 +57,7 @@ class FixtureDriver implements BrowserDriver {
     return { account: this.account, url: this.url, targetUrl: request.targetUrl, state: 'after', verified: true, evidence: [] } as T;
   }
 }
-function fixture(minActionIntervalMs = 0, writesEnabled = true, assertAccess: () => void = () => {}) {
+function fixture(minActionIntervalMs = 0, writesEnabled = true, assertAccess: () => void = () => {}, authorizeMedia?: RemoteMediaAuthorizer) {
   const dataDir = mkdtempSync(join(tmpdir(), 'threads-remote-social-'));
   const raw = new FixtureDriver();
   const readCalls: Record<string, unknown>[] = [];
@@ -69,7 +69,7 @@ function fixture(minActionIntervalMs = 0, writesEnabled = true, assertAccess: ()
   const config: Config = { dataDir, profileDir: join(dataDir, 'profile'), channel: 'chrome', headless: true, timeoutMs: 100,
     writesEnabled, minActionIntervalMs };
   const service = new ThreadsService(readDriver, {} as SearchIndex, config);
-  const controller = new RemoteSocialController(service, raw, assertAccess);
+  const controller = new RemoteSocialController(service, raw, assertAccess, authorizeMedia);
   return { raw, readDriver, readCalls, service, controller, dataDir, cleanup() {
     controller.invalidatePrepared();
     assert.ok(resolve(dataDir).startsWith(resolve(tmpdir()) + '\\') || resolve(dataDir).startsWith(resolve(tmpdir()) + '/'));
@@ -77,6 +77,122 @@ function fixture(minActionIntervalMs = 0, writesEnabled = true, assertAccess: ()
   } };
 }
 const operations = (raw: FixtureDriver, name: string) => raw.commands.filter(command => command.operation === name);
+
+function mediaFixture(kind: 'publish' | 'reply' | 'quote' = 'publish') {
+  const request = { kind, targetUrl: kind === 'publish' ? 'https://www.threads.com/' : target,
+    text: 'Approved fixture media post', mediaToken: 'host-issued-media-token', expectedAccount: 'fixture' };
+  const binding = { kind, targetUrl: request.targetUrl, account: 'fixture', active: true };
+  let authorizations = 0;
+  const h = fixture(0, true, () => {}, (candidate, account) => {
+    authorizations++;
+    if (!binding.active || candidate.mediaToken !== request.mediaToken || candidate.kind !== binding.kind ||
+        candidate.targetUrl !== binding.targetUrl || account !== binding.account)
+      throw new ThreadsError('MEDIA_APPROVAL_STALE', 'Media approval is unknown, stale or does not match the account and target.');
+  });
+  h.raw.url = request.targetUrl;
+  h.raw.composer = { ...safeComposer, present: true, attachments: true };
+  return { ...h, request, binding, authorizations: () => authorizations };
+}
+
+test('media callback is opt-in and restricts mediaToken to strict publication requests', async () => {
+  const h = fixture();
+  try {
+    await assert.rejects(h.controller.prepare({ kind: 'publish', targetUrl: 'https://www.threads.com/', text: 'text',
+      mediaToken: 'host-issued-media-token', expectedAccount: 'fixture' }), { code: 'INVALID_INPUT' });
+    assert.equal(h.raw.commands.length, 0);
+  } finally { h.cleanup(); }
+  const m = mediaFixture();
+  try {
+    for (const request of [{ ...m.request, mediaToken: '' }, { ...m.request, mediaToken: '../token' }, { ...m.request, mediaToken: undefined },
+      { ...m.request, mediaToken: 'x'.repeat(101) }, { ...args, mediaToken: m.request.mediaToken }, { ...m.request, files: [] }])
+      await assert.rejects(m.controller.prepare(request), { code: 'INVALID_INPUT' });
+    assert.equal(m.raw.commands.length, 0); assert.equal(m.authorizations(), 0);
+  } finally { m.cleanup(); }
+});
+
+test('bound media supports publish, reply and quote on the existing route and remains single-use', async () => {
+  for (const kind of ['publish','reply','quote'] as const) {
+    const h = mediaFixture(kind);
+    try {
+      const prepared = await h.controller.prepare(h.request);
+      assert.equal(prepared.request.mediaToken, h.request.mediaToken);
+      assert.equal(h.authorizations(), 3); // target, immediately before stage, after stage
+      assert.equal((await h.controller.execute(prepared.id, 'fixture')).outcome, 'verified'); // synthetic runtime observation only
+      assert.equal(h.authorizations(), 4); // immediately before commit
+      await assert.rejects(h.controller.execute(prepared.id, 'fixture'), { code: 'INVALID_ACTION' });
+      assert.equal(operations(h.raw, 'commit').length, 1);
+      assert.equal(h.readCalls.length, 0);
+      assert.ok(!h.raw.commands.some(command => command.type === 'navigate'));
+    } finally { h.cleanup(); }
+  }
+});
+
+test('unknown, stale and mismatched media bindings fail before stage without navigation', async () => {
+  for (const failure of ['unknown','stale','bound-target','bound-account','current-target','viewer']) {
+    const h = mediaFixture();
+    try {
+      let request = h.request;
+      if (failure === 'unknown') request = { ...request, mediaToken: 'unissued-token' };
+      if (failure === 'stale') h.binding.active = false;
+      if (failure === 'bound-target') h.binding.targetUrl = target;
+      if (failure === 'bound-account') h.binding.account = 'other';
+      if (failure === 'current-target') h.raw.url = target;
+      if (failure === 'viewer') h.raw.account = 'other';
+      await assert.rejects(h.controller.prepare(request), { code: failure === 'current-target' ? 'TARGET_CHANGED_ROUTE' : failure === 'viewer' ? 'ACCOUNT_MISMATCH' : 'MEDIA_APPROVAL_STALE' });
+      assert.equal(operations(h.raw, 'stage').length, 0); assert.equal(h.readCalls.length, 0);
+    } finally { h.cleanup(); }
+  }
+});
+
+test('approved media still rejects unrelated text drafts, ambiguous or missing composers', async () => {
+  for (const state of [undefined, { ...safeComposer, present: true, attachments: true, nonempty: true },
+    { ...safeComposer, present: true, attachments: true, ambiguous: true }, { ...safeComposer }]) {
+    const h = mediaFixture();
+    try {
+      h.raw.composer = state;
+      await assert.rejects(h.controller.prepare(h.request), { code: 'COMPOSER_BUSY' });
+      assert.equal(operations(h.raw, 'stage').length, 0); assert.equal(h.readCalls.length, 0);
+    } finally { h.cleanup(); }
+  }
+});
+
+test('media revoked during an awaited precommit read blocks dispatch and consumes the preparation', async () => {
+  const h = mediaFixture();
+  try {
+    const prepared = await h.controller.prepare(h.request);
+    let release!: () => void;
+    h.raw.readGate = new Promise<void>(resolve => { release = resolve; });
+    const pending = h.controller.execute(prepared.id, 'fixture');
+    await new Promise(resolve => setImmediate(resolve));
+    h.binding.active = false; release();
+    const result = await pending;
+    assert.equal(result.outcome, 'outcome-uncertain');
+    assert.equal('error' in result ? result.error : undefined, 'MEDIA_APPROVAL_STALE');
+    assert.equal(operations(h.raw, 'commit').length, 0);
+    h.binding.active = true; h.raw.readGate = undefined;
+    await assert.rejects(h.controller.execute(prepared.id, 'fixture'), { code: 'INVALID_ACTION' });
+  } finally { h.cleanup(); }
+});
+
+test('media revoked during staging cannot yield a preparation, and moved media never commits', async () => {
+  const h = mediaFixture();
+  try {
+    let release!: () => void;
+    h.raw.stageGate = new Promise<void>(resolve => { release = resolve; });
+    const pending = h.controller.prepare(h.request);
+    const rejected = assert.rejects(pending, { code: 'MEDIA_APPROVAL_STALE' });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(operations(h.raw, 'stage').length, 1);
+    h.binding.active = false; release(); await rejected;
+    h.binding.active = true; h.raw.stageGate = undefined;
+    const prepared = await h.controller.prepare(h.request);
+    h.raw.url = target;
+    const result = await h.controller.execute(prepared.id, 'fixture');
+    assert.equal(result.outcome, 'outcome-uncertain');
+    assert.equal('error' in result ? result.error : undefined, 'TARGET_CHANGED_ROUTE');
+    assert.equal(operations(h.raw, 'commit').length, 0); assert.equal(h.readCalls.length, 0);
+  } finally { h.cleanup(); }
+});
 
 test('shared controller retains preparation across two requests, executes once and writes only bounded audit fields', async () => {
   const h = fixture();

@@ -1,13 +1,16 @@
 import type { MediaFileManifest, MediaStageResult } from './media.js';
+import { assertMediaComposerBinding, openMediaComposer, type MediaComposerBinding, type MediaComposeRequest } from './social-runtime.js';
 
 interface Transfer {
   id: string; generation: number; expires: number; timer: ReturnType<typeof setTimeout>; url: string; account: string;
-  dialog: HTMLElement; editor: HTMLElement; input: HTMLInputElement; fingerprint: string;
+  dialog: HTMLElement; editor: HTMLElement; input: HTMLInputElement; fingerprint: string; manualEpoch: number; binding?: MediaComposerBinding;
   files: Array<{ manifest: MediaFileManifest; bytes: Uint8Array; received: number }>;
 }
 let transfer: Transfer | undefined;
 let generation = 0;
-let approved: { token: string; expires: number; timer: ReturnType<typeof setTimeout>; url: string; account: string; dialog: HTMLElement; editor: HTMLElement; attachmentScope: HTMLElement; input: HTMLInputElement; files: File[]; previews?: Array<{ node: Element; source: string | null }> } | undefined;
+let opening = false, manualEpoch = 0;
+let removeManualWatch: (() => void) | undefined;
+let approved: { token: string; expires: number; timer: ReturnType<typeof setTimeout>; url: string; account: string; dialog: HTMLElement; editor: HTMLElement; attachmentScope: HTMLElement; input: HTMLInputElement; files: File[]; manualEpoch: number; binding?: MediaComposerBinding; previews?: Array<{ node: Element; source: string | null }> } | undefined;
 const maxTotal = 64 * 1024 * 1024;
 function fail(code: string, message: string): never { throw new Error(`${code}: ${message}`); }
 function visible(el: Element): el is HTMLElement {
@@ -59,13 +62,21 @@ function check(current: Transfer): void {
   guard();
   if (current.generation !== generation) fail('MEDIA_CANCELLED', 'The transfer was cancelled; no files were dispatched.');
   if (Date.now() > current.expires) { clear(); fail('MEDIA_EXPIRED', 'The transfer expired.'); }
-  if (location.href !== current.url || account() !== current.account || !current.dialog.isConnected || !current.input.isConnected ||
+  if (manualEpoch !== current.manualEpoch || location.href !== current.url || account() !== current.account || !current.dialog.isConnected || !current.input.isConnected ||
       !current.editor.isConnected || !visible(current.dialog) || !visible(current.editor) ||
       fingerprint(current.dialog, current.editor, current.input) !== current.fingerprint)
     fail('MEDIA_COMPOSER_CHANGED', 'The account, page, composer or file input changed; no files were dispatched.');
   const fresh = composer();
   if (fresh.dialog !== current.dialog || fresh.editor !== current.editor || fresh.input !== current.input)
     fail('MEDIA_COMPOSER_CHANGED', 'The composer changed; no files were dispatched.');
+  if (current.binding) assertMediaComposerBinding(current.binding);
+}
+function watchManualTakeover(): void {
+  if (removeManualWatch) return;
+  const events = ['pointerdown', 'mousedown', 'touchstart', 'keydown', 'beforeinput', 'input', 'paste', 'cut', 'drop', 'wheel'];
+  const listener = (event: Event) => { if (event.isTrusted) manualEpoch++; };
+  for (const type of events) document.addEventListener(type, listener, true);
+  removeManualWatch = () => { for (const type of events) document.removeEventListener(type, listener, true); };
 }
 function clear(): void { if (transfer) clearTimeout(transfer.timer); transfer = undefined; }
 /** Called only by the fixed extension disconnect handler. Preserves user-visible drafts. */
@@ -74,6 +85,7 @@ export function cancelMediaTransfers(): void {
   clear();
   if (approved) clearTimeout(approved.timer);
   approved = undefined;
+  removeManualWatch?.(); removeManualWatch = undefined;
 }
 function accepts(input: HTMLInputElement, file: MediaFileManifest): boolean {
   const accept = input.accept.split(',').map(value => value.trim().toLowerCase()).filter(Boolean);
@@ -82,10 +94,10 @@ function accepts(input: HTMLInputElement, file: MediaFileManifest): boolean {
 }
 
 /** Require the same staged files plus visible attachment evidence before social prepare/commit. */
-export function assertApprovedMedia(mediaToken: string, scope: HTMLElement): void {
+export function assertApprovedMedia(mediaToken: string, scope: HTMLElement): MediaComposerBinding | undefined {
   guard();
   const state = approved;
-  if (!state || state.token !== mediaToken || Date.now() > state.expires || location.href !== state.url || account() !== state.account ||
+  if (!state || state.manualEpoch !== manualEpoch || state.token !== mediaToken || Date.now() > state.expires || location.href !== state.url || account() !== state.account ||
       scope !== state.dialog || !scope.isConnected || !visible(scope) || !state.input.isConnected || !scope.contains(state.input))
     fail('MEDIA_APPROVAL_STALE', 'The staged media approval is missing, expired or belongs to another composer.');
   const files = [...(state.input.files || [])];
@@ -99,6 +111,8 @@ export function assertApprovedMedia(mediaToken: string, scope: HTMLElement): voi
     preview.node !== state.previews![index]!.node || preview.source !== state.previews![index]!.source)))
     fail('MEDIA_APPROVAL_STALE', 'The attachment preview changed after preparation.');
   state.previews ??= previews;
+  if (state.binding) assertMediaComposerBinding(state.binding);
+  return state.binding;
 }
 
 /** Fixed commands only. Buffers expire; finish stages files and never clicks Publish. */
@@ -106,13 +120,11 @@ export async function media(command: Record<string, unknown>): Promise<unknown> 
   guard();
   if (transfer && Date.now() > transfer.expires) clear();
   if (command.operation === 'begin') {
-    if (transfer) fail('MEDIA_BUSY', 'Another transfer is already pending.');
+    if (transfer || opening) fail('MEDIA_BUSY', 'Another transfer is already pending.');
     if (typeof command.expectedAccount !== 'string' || !/^[\w.]{1,30}$/.test(command.expectedAccount)) fail('INVALID_MEDIA', 'An expected account is required.');
     const verifiedAccount = account();
     if (command.expectedAccount.toLowerCase() !== verifiedAccount) fail('ACCOUNT_MISMATCH', 'The selected account does not match.');
-    const { dialog, editor, input } = composer();
     if (!Array.isArray(command.files) || command.files.length < 1 || command.files.length > 20) fail('INVALID_MEDIA', 'Provide between 1 and 20 files.');
-    if (command.files.length > 1 && !input.multiple) fail('MEDIA_MULTIPLE_UNSUPPORTED', 'The selected file input does not accept multiple files.');
     let total = 0;
     const manifests = command.files.map((file: MediaFileManifest) => {
       if (!file || typeof file.name !== 'string' || !file.name || file.name.length > 180 || /[\\/\x00-\x1f\x7f]/.test(file.name) ||
@@ -121,12 +133,27 @@ export async function media(command: Record<string, unknown>): Promise<unknown> 
         typeof file.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(file.sha256)) fail('INVALID_MEDIA', 'Invalid file manifest.');
       total += file.size;
       if (total > maxTotal) fail('MEDIA_SIZE_LIMIT', 'The total byte limit is 64 MiB.');
-      if (!accepts(input, file)) fail('MEDIA_INPUT_TYPE_UNSUPPORTED', 'The file input does not accept this media type.');
       return { name: file.name, mime: file.mime, size: file.size, sha256: file.sha256 };
     });
+    // Validate every manifest and byte bound before opening any UI.
+    const expectedGeneration = generation, expectedManualEpoch = manualEpoch;
+    watchManualTakeover();
+    let binding: MediaComposerBinding | undefined;
+    if (command.compose !== undefined) {
+      opening = true;
+      try { binding = await openMediaComposer(command.compose as MediaComposeRequest, verifiedAccount); }
+      finally { opening = false; }
+    }
+    if (generation !== expectedGeneration) fail('MEDIA_CANCELLED', 'The transfer was cancelled while opening its composer.');
+    if (manualEpoch !== expectedManualEpoch) fail('MEDIA_COMPOSER_CHANGED', 'Manual interaction took ownership of the composer.');
+    if (account() !== verifiedAccount) fail('ACCOUNT_MISMATCH', 'The selected account changed.');
+    const { dialog, editor, input } = composer();
+    if (binding && (binding.scope !== dialog || binding.editor !== editor)) fail('MEDIA_COMPOSER_CHANGED', 'The opened composer was replaced.');
+    if (manifests.length > 1 && !input.multiple) fail('MEDIA_MULTIPLE_UNSUPPORTED', 'The selected file input does not accept multiple files.');
+    if (manifests.some(file => !accepts(input, file))) fail('MEDIA_INPUT_TYPE_UNSUPPORTED', 'The file input does not accept this media type.');
     const id = crypto.randomUUID();
     transfer = { id, generation, url: location.href, account: verifiedAccount, expires: Date.now() + 300_000,
-      timer: setTimeout(clear, 300_000), dialog, editor, input, fingerprint: fingerprint(dialog, editor, input),
+      timer: setTimeout(clear, 300_000), dialog, editor, input, fingerprint: fingerprint(dialog, editor, input), manualEpoch, binding,
       files: manifests.map(manifest => ({ manifest, bytes: new Uint8Array(manifest.size), received: 0 })) };
     return { uploadId: id, expiresInMs: 300_000, maxChunkBytes: 32 * 1024 };
   }
@@ -162,7 +189,7 @@ export async function media(command: Record<string, unknown>): Promise<unknown> 
   const mediaToken = crypto.randomUUID();
   if (approved) clearTimeout(approved.timer);
   approved = { token: mediaToken, expires: Date.now() + 600_000, timer: setTimeout(() => { approved = undefined; }, 600_000), url: current.url, account: current.account,
-    dialog: current.dialog, editor: current.editor, attachmentScope: attachmentScope(current.dialog, current.editor), input: current.input, files: [...data.files] };
+    dialog: current.dialog, editor: current.editor, attachmentScope: attachmentScope(current.dialog, current.editor), input: current.input, files: [...data.files], manualEpoch: current.manualEpoch, binding: current.binding };
   const result: MediaStageResult = { status: 'staged', mediaToken, fileCount: current.files.length, files: current.files.map(file => file.manifest.name),
     published: false, previewReady: null, warning: 'Files were assigned and input events dispatched. Inspect the actual preview and wait for processing before preparing publication.' };
   return result;

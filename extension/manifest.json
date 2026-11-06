@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Threads MCP 本機連接器",
   "description": "將你選取的 Threads 分頁連接到本機 MCP。只在你按下連接後啟用，不讀取 Cookie。",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "minimum_chrome_version": "116",
   "permissions": [
     "activeTab",

@@ -5,16 +5,18 @@ import type { PageRead } from './page-runtime.js';
 import { SocialActions } from './social-actions.js';
 import { sameThreadsRoute, type ThreadsService } from './service.js';
 import { ThreadsError } from './types.js';
-import { RemoteSocialDriver, checkedRemoteSocialArgs, remoteAccount, assertRemoteDraftSafe, assertRemoteViewer } from './remote-social-driver.js';
+import { RemoteSocialDriver, checkedRemoteSocialArgs, remoteAccount, assertRemoteDraftSafe, assertRemoteMediaDraftSafe, assertRemoteViewer, type RemoteMediaAuthorizer } from './remote-social-driver.js';
 export { REMOTE_SOCIAL_KINDS } from './remote-social-driver.js';
+export type { RemoteMediaAuthorizer } from './remote-social-driver.js';
 
 /** One instance per HTTP host lifetime, shared by every authenticated request. */
 export class RemoteSocialController {
   private generation = 0;
   private readonly driver: RemoteSocialDriver;
   private readonly actions: SocialActions;
-  constructor(private readonly service: ThreadsService, private readonly rawDriver: BrowserDriver, private readonly assertAccess: () => void = () => {}) {
-    this.driver = new RemoteSocialDriver(rawDriver, service.driver, assertAccess);
+  constructor(private readonly service: ThreadsService, private readonly rawDriver: BrowserDriver, private readonly assertAccess: () => void = () => {},
+    private readonly authorizeMedia?: RemoteMediaAuthorizer) {
+    this.driver = new RemoteSocialDriver(rawDriver, service.driver, assertAccess, authorizeMedia);
     this.actions = new SocialActions(this.driver, { writesEnabled: service.config.writesEnabled,
       minActionIntervalMs: service.config.minActionIntervalMs, reserveWrite: () => service.reserveWrite(),
       audit: event => appendFileSync(join(service.config.dataDir, 'remote-actions.jsonl'), JSON.stringify(event) + '\n', { mode: 0o600 }) });
@@ -28,7 +30,14 @@ export class RemoteSocialController {
     this.assertGeneration(generation);
     this.driver.expectAccount(args.expectedAccount);
     let page = await this.rawDriver.command<PageRead>({ type: 'read' });
-    this.assertGeneration(generation); assertRemoteViewer(page, args.expectedAccount); assertRemoteDraftSafe(page);
+    this.assertGeneration(generation); assertRemoteViewer(page, args.expectedAccount);
+    if (args.request.mediaToken) {
+      if (!sameThreadsRoute(page.url, args.request.targetUrl)) throw new ThreadsError('TARGET_CHANGED_ROUTE', 'Authorized media must remain on its existing composer route; remote navigation is forbidden.');
+      this.authorizeMedia!(args.request, args.expectedAccount);
+      this.assertGeneration(generation); assertRemoteMediaDraftSafe(page);
+      return;
+    }
+    assertRemoteDraftSafe(page);
     if (!sameThreadsRoute(page.url, args.request.targetUrl)) {
       await this.driver.command({ type: 'navigate', url: args.request.targetUrl });
       this.assertGeneration(generation);
@@ -40,7 +49,7 @@ export class RemoteSocialController {
   inspect(value: unknown) {
     const generation = this.generation;
     return this.service.serial(async () => {
-      const args = checkedRemoteSocialArgs(value, true);
+      const args = checkedRemoteSocialArgs(value, true, !!this.authorizeMedia);
       await this.target(args, generation);
       const result = await this.actions.inspect(args.request);
       this.assertGeneration(generation);
@@ -51,7 +60,7 @@ export class RemoteSocialController {
   prepare(value: unknown) {
     const generation = this.generation;
     return this.service.serial(async () => {
-      const args = checkedRemoteSocialArgs(value);
+      const args = checkedRemoteSocialArgs(value, false, !!this.authorizeMedia);
       if (!this.service.config.writesEnabled) throw new ThreadsError('WRITES_DISABLED', 'Remote social preparation requires explicitly enabled writes.');
       await this.target(args, generation);
       try {

@@ -34,9 +34,10 @@ test('supervisor config, command and environment prevent accidental secret/bridg
   assert.equal(command.args.includes('127.0.0.1:19760'), true);
   assert.equal(command.args.some((part: string) => part.includes('19758')), false);
   assert.equal(command.args.includes(join(config.stateDir, 'cloudflared-supervisor.yml')), true);
-  const env = childEnvironment(config, { PATH: 'fixture-path', SystemRoot: 'C:\\Windows', TUNNEL_TOKEN: 'SYNTHETIC_DO_NOT_LOG', TUNNEL_LOGFILE: 'bad.log', TUNNEL_CONFIG: 'bad.yml', NODE_OPTIONS: '--inspect', THREADS_API_ACCESS_TOKEN: 'SYNTHETIC_API', THREADS_ALLOW_WRITES: 'true', THREADS_REMOTE_ALLOW_WRITES: 'true' });
+  const env = childEnvironment(config, { PATH: 'fixture-path', SystemRoot: 'C:\\Windows', TUNNEL_TOKEN: 'SYNTHETIC_DO_NOT_LOG', TUNNEL_LOGFILE: 'bad.log', TUNNEL_CONFIG: 'bad.yml', NODE_OPTIONS: '--inspect', THREADS_API_ACCESS_TOKEN: 'SYNTHETIC_API', THREADS_ALLOW_WRITES: 'true', THREADS_REMOTE_ALLOW_WRITES: 'true', THREADS_REMOTE_ALLOW_MEDIA: 'true' });
   assert.equal(env.THREADS_ALLOW_WRITES, 'false');
   assert.equal(config.remoteWritesEnabled, false); assert.equal(env.THREADS_REMOTE_ALLOW_WRITES, 'false');
+  assert.equal(config.remoteMediaEnabled, false); assert.equal(env.THREADS_REMOTE_ALLOW_MEDIA, 'false');
   assert.equal(env.TUNNEL_TOKEN, undefined); assert.equal(env.TUNNEL_LOGFILE, undefined); assert.equal(env.TUNNEL_CONFIG, undefined);
   assert.equal(env.NODE_OPTIONS, undefined); assert.equal(env.THREADS_API_ACCESS_TOKEN, undefined);
   for (const overrides of [{ httpPort: 19758 }, { metricsPort: 19758 }, { metricsPort: 19759 }, { tunnelTokenFile: join(project, 'outside.token') }, { tunnelTokenFile: join(config.stateDir, 'nested', 'tunnel.token') }, { token: 'SYNTHETIC_NOT_ALLOWED' }, { healthTimeoutMs: 2000 }])
@@ -56,6 +57,25 @@ test('remote writes require an explicit boolean config and never inherit shell o
   for (const remoteWritesEnabled of [undefined, null, 'true', 'false', 0, 1, {}, []])
     assert.throws(() => configured({ remoteWritesEnabled }), { code: 'CONFIG_INVALID' });
   assert.throws(() => configured({ remoteWritesEnabled: true, remoteWriteEnabled: true }), { code: 'CONFIG_INVALID' });
+});
+
+test('remote media requires both explicit config opt-ins and ignores inherited media settings', () => {
+  assert.equal(configured().remoteMediaEnabled, false);
+  assert.equal(configured({ remoteWritesEnabled: true }).remoteMediaEnabled, false);
+  for (const [remoteWritesEnabled, remoteMediaEnabled] of [[false, false], [true, false], [true, true]]) {
+    const config = configured({ remoteWritesEnabled, remoteMediaEnabled });
+    for (const inherited of ['true', 'false']) {
+      const env = childEnvironment(config, { THREADS_ALLOW_WRITES: 'true', THREADS_REMOTE_ALLOW_WRITES: inherited, THREADS_REMOTE_ALLOW_MEDIA: inherited });
+      assert.equal(env.THREADS_REMOTE_ALLOW_MEDIA, String(remoteMediaEnabled));
+      assert.equal(env.THREADS_REMOTE_ALLOW_WRITES, String(remoteWritesEnabled));
+      assert.equal(env.THREADS_ALLOW_WRITES, 'false');
+    }
+  }
+  for (const remoteMediaEnabled of [undefined, null, 'true', 'false', 0, 1, {}, []])
+    assert.throws(() => configured({ remoteWritesEnabled: true, remoteMediaEnabled }), { code: 'CONFIG_INVALID' });
+  assert.throws(() => configured({ remoteMediaEnabled: true }), { code: 'CONFIG_INVALID' });
+  assert.throws(() => configured({ remoteWritesEnabled: false, remoteMediaEnabled: true }), { code: 'CONFIG_INVALID' });
+  assert.throws(() => configured({ remoteWritesEnabled: true, remoteMediaEnabled: true, remoteMediaEnable: true }), { code: 'CONFIG_INVALID' });
 });
 
 test('owned crashes restart with bounded backoff, while alive disconnected/revoked services do not restart', async () => {
@@ -145,11 +165,11 @@ test('health reports revoked access and disconnected browser separately; saved l
   await mkdir(dataRoot, { recursive: true }); const directory = await mkdtemp(join(dataRoot, 'windows-supervisor-test-'));
   const stateDir = join(directory, 'remote-host'); await mkdir(stateDir);
   let mode = 'disconnected';
-  let serviceIdentity = 'threads-mcp-readonly'; let writesEnabled: boolean | undefined;
+  let serviceIdentity = 'threads-mcp-readonly'; let writesEnabled: boolean | undefined; let mediaEnabled: unknown;
   const server = createServer((req, res) => {
     if (mode === 'revoked') { res.writeHead(503).end(); return; }
     if (req.headers.authorization !== `Bearer ${'x'.repeat(43)}`) { res.writeHead(401).end(); return; }
-    res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ service: serviceIdentity, writesEnabled, revision: 'remote-health-1', http: 'up', busy: false, bridge: { state: 'extension-disconnected', checkedAt: new Date().toISOString(), errorCode: 'PRIVATE_SHOULD_NOT_ECHO' }, browser: { connected: false }, extra: 'SYNTHETIC_PRIVATE_BODY' }));
+    res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ service: serviceIdentity, writesEnabled, mediaEnabled, revision: 'remote-health-1', http: 'up', busy: false, bridge: { state: 'extension-disconnected', checkedAt: new Date().toISOString(), errorCode: 'PRIVATE_SHOULD_NOT_ECHO' }, browser: { connected: false }, extra: 'SYNTHETIC_PRIVATE_BODY' }));
   });
   await new Promise<void>(resolvePromise => server.listen(0, '127.0.0.1', resolvePromise));
   try {
@@ -157,6 +177,7 @@ test('health reports revoked access and disconnected browser separately; saved l
     await writeFile(join(directory, 'remote-access.token'), 'x'.repeat(43));
     const health = await probeService(config, 'http'); assert.equal(health.state, 'http-up'); assert.equal(health.browserConnected, false); assert.equal(health.bridgeState, 'extension-disconnected');
     assert.equal(health.remoteWritesEnabled, false);
+    assert.equal(health.remoteMediaEnabled, false);
     assert.equal(JSON.stringify(health).includes('PRIVATE'), false);
     const controlledConfig = configured({ ...sample(directory), httpPort: port, remoteWritesEnabled: true });
     assert.equal((await probeService(controlledConfig, 'http')).state, 'unexpected-response');
@@ -166,6 +187,20 @@ test('health reports revoked access and disconnected browser separately; saved l
     assert.equal((await probeService(config, 'http')).state, 'unexpected-response');
     const controlledHealth = await probeService(controlledConfig, 'http');
     assert.equal(controlledHealth.state, 'http-up'); assert.equal(controlledHealth.remoteWritesEnabled, true);
+    assert.equal(controlledHealth.remoteMediaEnabled, false);
+    const mediaConfig = configured({ ...sample(directory), httpPort: port, remoteWritesEnabled: true, remoteMediaEnabled: true });
+    for (mediaEnabled of [undefined, false, null, 'true'])
+      assert.equal((await probeService(mediaConfig, 'http')).state, 'unexpected-response');
+    mediaEnabled = true;
+    assert.equal((await probeService(controlledConfig, 'http')).state, 'unexpected-response');
+    const mediaHealth = await probeService(mediaConfig, 'http');
+    assert.equal(mediaHealth.state, 'http-up'); assert.equal(mediaHealth.remoteMediaEnabled, true);
+    const mediaReport = await diagnose(mediaConfig);
+    assert.equal(mediaReport.config.remoteMediaEnabled, true); assert.equal(mediaReport.health.http.remoteMediaEnabled, true);
+    for (mediaEnabled of [null, 'false'])
+      assert.equal((await probeService(controlledConfig, 'http')).state, 'unexpected-response');
+    mediaEnabled = false;
+    assert.equal((await probeService(controlledConfig, 'http')).state, 'http-up');
     writesEnabled = false;
     assert.equal((await probeService(controlledConfig, 'http')).state, 'unexpected-response');
     serviceIdentity = 'threads-mcp-readonly'; writesEnabled = true;
@@ -175,7 +210,7 @@ test('health reports revoked access and disconnected browser separately; saved l
     mode = 'revoked'; assert.equal((await probeService(config, 'http')).state, 'access-disabled');
     await rm(join(directory, 'remote-access.token')); assert.equal((await probeService(config, 'http')).state, 'access-disabled');
     await writeFile(join(stateDir, 'status.json'), JSON.stringify({ schemaVersion: 1, runId: 'SYNTHETIC_PRIVATE_SNAPSHOT', updatedAt: new Date().toISOString(), token: 'SYNTHETIC_PRIVATE_SNAPSHOT' }));
-    const report = await diagnose(config); assert.equal(report.ports.http.listening, true); assert.equal(report.supervisor.snapshot, null); assert.equal(report.config.remoteWritesEnabled, false); assert.equal(JSON.stringify(report).includes('SYNTHETIC_PRIVATE'), false);
+    const report = await diagnose(config); assert.equal(report.ports.http.listening, true); assert.equal(report.supervisor.snapshot, null); assert.equal(report.config.remoteWritesEnabled, false); assert.equal(report.config.remoteMediaEnabled, false); assert.equal(JSON.stringify(report).includes('SYNTHETIC_PRIVATE'), false);
   } finally {
     server.closeAllConnections(); await new Promise<void>(resolvePromise => server.close(() => resolvePromise()));
     assert.ok(directory.startsWith(join(dataRoot, 'windows-supervisor-test-'))); await rm(directory, { recursive: true, force: true });
@@ -195,6 +230,7 @@ test('Windows scripts parse; isolated init and protect-secrets never install a t
     const init = spawnSync(ps, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', management, '-Action', 'init', '-Config', configPath, '-Hostname', 'threads.example.com', '-NodePath', process.execPath], { windowsHide: true, encoding: 'utf8', timeout: 15000 });
     assert.equal(init.status, 0, init.stderr); const config = await loadConfig(configPath); assert.equal(config.tunnelEnabled, false); assert.equal(config.healthTimeoutMs, 5000);
     assert.equal(config.remoteWritesEnabled, false); assert.equal(JSON.parse(await readFile(configPath, 'utf8')).remoteWritesEnabled, false);
+    assert.equal(config.remoteMediaEnabled, false); assert.equal(JSON.parse(await readFile(configPath, 'utf8')).remoteMediaEnabled, false);
     await writeFile(join(directory, 'remote-access.token'), 'SYNTHETIC_TEST_FILE_NOT_A_CREDENTIAL');
     await writeFile(config.tunnelTokenFile, 'SYNTHETIC_TEST_FILE_NOT_A_CREDENTIAL');
     const protect = spawnSync(ps, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', management, '-Action', 'protect-secrets', '-Config', configPath], { windowsHide: true, encoding: 'utf8', timeout: 15000 });

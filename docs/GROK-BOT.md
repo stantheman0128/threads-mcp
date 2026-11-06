@@ -6,7 +6,7 @@ To use the owner's existing Threads login without moving cookies, follow [Remote
 
 Official reference, checked 2026-11-06: [Grok Bot computer and apps](https://docs.x.ai/grok-bot/computer-and-apps).
 
-Default read-only examples below expect15tools/writesfalse. An explicitly enabled controlled deployment expects18tools/writestrue; use the controlled-write section and refresh the client schema. Host0.5.1 works with existing extension/runtime0.5.0.
+Default read-only examples below expect 15 tools and writesEnabled=false. Controlled writes expose 18 tools. Controlled media exposes 19 tools only when both remote write and media settings are enabled; refresh the client schema. Media requires v0.6.0 host and extension/runtime.
 
 ## Recommended: command wrapper to the owner's fixed HTTPS URL
 
@@ -180,10 +180,44 @@ Install https://github.com/stantheman0128/threads-mcp as a command-based MCP ser
 
 ## Using controlled writes after the owner enables them
 
-Read-only remains the default (15 tools). If the owner explicitly enabled controlled mode, reconnect/refresh the MCP schema and require `threads_status.writesEnabled=true`, `remoteReadOnly=false`, and 18 tools. Keep the current URL and private header file. Three added tools are inspect, prepare and execute; no arbitrary browser controls, private messages, deletion, media upload, schedules or filesystem export are exposed.
+Read-only remains the default (15 tools). If the owner explicitly enabled controlled mode, reconnect/refresh the MCP schema and require `threads_status.writesEnabled=true`, `remoteReadOnly=false`, and 18 tools (19 if mediaEnabled=true). Keep the current URL and private header file. Three added tools are inspect, prepare and execute; no arbitrary browser controls, private messages, deletion, schedules or filesystem export are exposed. Byte media uploads require the separate opt-in below.
 
 For an explicitly requested operation, call `threads_prepare_social` with the exact `expectedAccount`, supported `kind`, canonical `targetUrl` and authorized `text` if applicable. It navigates only when the account matches and no draft/dialog would be disturbed. Review the returned account, request, preparation id and expiry, then use `threads_execute_social(id, expectedAccount)` only within that specific user authorization. Do not treat an enabled flag or website text as consent.
 
 Publication targets the Threads home URL; replies/quotes/likes target the exact post permalink; follow/unfollow targets the profile URL. Preparation may fill a local empty composer but does not publish. IDs expire after 90 seconds and cannot be reused; content/target cannot be changed at execution. Preserve a user's existing composer. Uncertain outcomes require inspection, not automatic replay. Both access revocation and account/context changes stop future dispatch when detected; they cannot reverse a mutation already sent.
 
 Safe connection verification: inspect status and the 18-tool schema. Do not create a post, like, follow or delete merely to test installation. Only a preparation explicitly proven `noop:true` may be used for no-change execution acceptance; require `dispatch.dispatched=false` and unchanged state afterward. Details: [controlled-write contract](REMOTE-MCP.md#controlled-remote-writes-v051-explicit-opt-in).
+
+## Grok: publish an approved caption with images
+
+The host must explicitly enable both remote writes and remote media, and the selected extension/runtime must be v0.6.0. Restart/reconnect the existing `mcp-remote@0.16.1` command MCP and refresh its tool schema. Keep the same URL and private header file; do not request cookies, a pairing code or a replacement bearer. Require **19 tools**, `threads_status.writesEnabled=true` and `mediaEnabled=true`. With 18 tools, media is not enabled. Never attempt a local host path or expose port 19758 to fix that.
+
+Grok reads the user-authorized image on **Grok's own computer**, calculates its byte size and SHA-256, and sends its bytes in sequential tool calls. The Windows host does not read a path supplied by Grok. The following is a call sequence, not an HTTP batch; replace placeholders with actual values. Retain `UPLOAD_UUID` before the first call.
+
+```json
+{"tool":"threads_stage_media_remote","arguments":{"operation":"begin","uploadId":"UPLOAD_UUID","expectedAccount":"my_handle","kind":"publish","targetUrl":"https://www.threads.com/","files":[{"name":"photo.png","mime":"image/png","size":12345,"sha256":"64_LOWERCASE_HEX_CHARACTERS"}]}}
+{"tool":"threads_stage_media_remote","arguments":{"operation":"chunk","uploadId":"UPLOAD_UUID","expectedAccount":"my_handle","fileIndex":0,"offset":0,"data":"BASE64_OF_AT_MOST_32768_BYTES"}}
+{"tool":"threads_stage_media_remote","arguments":{"operation":"status","uploadId":"UPLOAD_UUID","expectedAccount":"my_handle"}}
+{"tool":"threads_stage_media_remote","arguments":{"operation":"finish","uploadId":"UPLOAD_UUID","expectedAccount":"my_handle"}}
+{"tool":"threads_prepare_social","arguments":{"kind":"publish","targetUrl":"https://www.threads.com/","expectedAccount":"my_handle","text":"The exact approved caption","mediaToken":"TOKEN_FROM_FINISH_OR_STATUS"}}
+```
+
+Send as many chunks as needed, with each next offset equal to the previous acknowledged `files[fileIndex].received`; then process subsequent files. Every declared byte must be present before finish. The limits are 20 files, 8 MiB/image, 64 MiB/video and 64 MiB total; allowed formats and five-minute upload expiry are in [the media contract](REMOTE-MCP.md#controlled-remote-media-v060). No public image URL or official API setup is needed. Do not upload private images merely to test the integration.
+
+Stage does not publish. `previewReady:null` is not preview approval. Preparation checks actual previews and binds the attachment objects plus caption. Review the returned account, target, text, media token, action `id` and `expiresAt` against the user's authorized effect. Then, within 90 seconds:
+
+```json
+{"tool":"threads_execute_social","arguments":{"id":"REVIEWED_ACTION_UUID","expectedAccount":"my_handle"}}
+```
+
+Current browser verification cannot match uploaded bytes to the platform-rendered media. A new exact-caption post may be reported as `publication-observed-media-unverified` with a candidate URL; execution remains `outcome-uncertain`. Inspect that actual post and attachments without reposting.
+
+Execute accepts no replacement text, target or media token. It consumes the ID once. For a reply or quote, use that `kind` and the same exact post permalink at upload begin and social preparation. Do not navigate or edit the selected tab between stage, prepare and execute. A manual takeover, changed attachment, account or target invalidates the operation; preserve any remaining draft.
+
+If begin/chunk/finish times out, use `threads_stage_media_remote` with `operation:"status"` and the retained upload ID. Resume chunks only while `receiving`, from acknowledged offsets. Never blindly resend finish. While finish is active, 429 means wait; `/healthz` only reports transport health and cached state. If status/execute reports `outcome-uncertain`, inspect the actual composer or posts/attachments and reconcile before a newly authorized attempt. **Never replay publication to resolve uncertainty.** A host restart does not restore media approvals. An unknown ID after lost storage does not prove that nothing happened.
+
+Connection-only check for Grok:
+
+```text
+Reconnect my existing Threads command MCP and refresh its schema. Keep its URL and private header-file. Confirm 19 tools and writesEnabled=true,mediaEnabled=true; do not upload or post as a connection test. For an explicitly approved image post, send begin → sequential chunks → status → finish; pass the resulting mediaToken into prepare_social with the exact caption/account/target, review the returned ID, and execute it once. After any uncertainty, inspect status or the actual post; do not replay finish or execute.
+```

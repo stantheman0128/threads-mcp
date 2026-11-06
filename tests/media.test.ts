@@ -106,7 +106,10 @@ test('media runtime binds account/composer, stages exact bytes and invalidates c
     await assert.rejects(approve(), /MEDIA_PREVIEW_UNVERIFIED/);
     await page.evaluate(() => document.getElementById('unexpected-attachment')!.remove());
     await approve();
-    await page.locator('[contenteditable]').fill('explicitly prepared social text');
+    await page.locator('[contenteditable]').evaluate(el => {
+      el.textContent = 'explicitly prepared social text';
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: 'explicitly prepared social text' }));
+    });
     await approve();
     await page.evaluate(() => { document.querySelector('input')!.files = new DataTransfer().files; });
     await assert.rejects(approve(), /MEDIA_APPROVAL_STALE/);

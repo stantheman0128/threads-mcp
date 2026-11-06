@@ -467,6 +467,9 @@ var ThreadsMCP = (() => {
   // src/media-runtime.ts
   var transfer;
   var generation = 0;
+  var opening = false;
+  var manualEpoch = 0;
+  var removeManualWatch;
   var approved;
   var maxTotal = 64 * 1024 * 1024;
   function fail2(code, message) {
@@ -524,11 +527,23 @@ var ThreadsMCP = (() => {
       clear();
       fail2("MEDIA_EXPIRED", "The transfer expired.");
     }
-    if (location.href !== current2.url || account() !== current2.account || !current2.dialog.isConnected || !current2.input.isConnected || !current2.editor.isConnected || !visible(current2.dialog) || !visible(current2.editor) || fingerprint(current2.dialog, current2.editor, current2.input) !== current2.fingerprint)
+    if (manualEpoch !== current2.manualEpoch || location.href !== current2.url || account() !== current2.account || !current2.dialog.isConnected || !current2.input.isConnected || !current2.editor.isConnected || !visible(current2.dialog) || !visible(current2.editor) || fingerprint(current2.dialog, current2.editor, current2.input) !== current2.fingerprint)
       fail2("MEDIA_COMPOSER_CHANGED", "The account, page, composer or file input changed; no files were dispatched.");
     const fresh = composer();
     if (fresh.dialog !== current2.dialog || fresh.editor !== current2.editor || fresh.input !== current2.input)
       fail2("MEDIA_COMPOSER_CHANGED", "The composer changed; no files were dispatched.");
+    if (current2.binding) assertMediaComposerBinding(current2.binding);
+  }
+  function watchManualTakeover() {
+    if (removeManualWatch) return;
+    const events = ["pointerdown", "mousedown", "touchstart", "keydown", "beforeinput", "input", "paste", "cut", "drop", "wheel"];
+    const listener = (event) => {
+      if (event.isTrusted) manualEpoch++;
+    };
+    for (const type of events) document.addEventListener(type, listener, true);
+    removeManualWatch = () => {
+      for (const type of events) document.removeEventListener(type, listener, true);
+    };
   }
   function clear() {
     if (transfer) clearTimeout(transfer.timer);
@@ -539,6 +554,8 @@ var ThreadsMCP = (() => {
     clear();
     if (approved) clearTimeout(approved.timer);
     approved = void 0;
+    removeManualWatch?.();
+    removeManualWatch = void 0;
   }
   function accepts(input, file) {
     const accept = input.accept.split(",").map((value) => value.trim().toLowerCase()).filter(Boolean);
@@ -547,7 +564,7 @@ var ThreadsMCP = (() => {
   function assertApprovedMedia(mediaToken, scope) {
     guard();
     const state = approved;
-    if (!state || state.token !== mediaToken || Date.now() > state.expires || location.href !== state.url || account() !== state.account || scope !== state.dialog || !scope.isConnected || !visible(scope) || !state.input.isConnected || !scope.contains(state.input))
+    if (!state || state.manualEpoch !== manualEpoch || state.token !== mediaToken || Date.now() > state.expires || location.href !== state.url || account() !== state.account || scope !== state.dialog || !scope.isConnected || !visible(scope) || !state.input.isConnected || !scope.contains(state.input))
       fail2("MEDIA_APPROVAL_STALE", "The staged media approval is missing, expired or belongs to another composer.");
     const files = [...state.input.files || []];
     if (files.length !== state.files.length || files.some((file, index) => file !== state.files[index]))
@@ -559,26 +576,43 @@ var ThreadsMCP = (() => {
     if (state.previews && (previews.length !== state.previews.length || previews.some((preview, index) => preview.node !== state.previews[index].node || preview.source !== state.previews[index].source)))
       fail2("MEDIA_APPROVAL_STALE", "The attachment preview changed after preparation.");
     state.previews ??= previews;
+    if (state.binding) assertMediaComposerBinding(state.binding);
+    return state.binding;
   }
   async function media(command) {
     guard();
     if (transfer && Date.now() > transfer.expires) clear();
     if (command.operation === "begin") {
-      if (transfer) fail2("MEDIA_BUSY", "Another transfer is already pending.");
+      if (transfer || opening) fail2("MEDIA_BUSY", "Another transfer is already pending.");
       if (typeof command.expectedAccount !== "string" || !/^[\w.]{1,30}$/.test(command.expectedAccount)) fail2("INVALID_MEDIA", "An expected account is required.");
       const verifiedAccount = account();
       if (command.expectedAccount.toLowerCase() !== verifiedAccount) fail2("ACCOUNT_MISMATCH", "The selected account does not match.");
-      const { dialog, editor, input } = composer();
       if (!Array.isArray(command.files) || command.files.length < 1 || command.files.length > 20) fail2("INVALID_MEDIA", "Provide between 1 and 20 files.");
-      if (command.files.length > 1 && !input.multiple) fail2("MEDIA_MULTIPLE_UNSUPPORTED", "The selected file input does not accept multiple files.");
       let total = 0;
       const manifests = command.files.map((file) => {
         if (!file || typeof file.name !== "string" || !file.name || file.name.length > 180 || /[\\/\x00-\x1f\x7f]/.test(file.name) || !["image/jpeg", "image/png", "image/gif", "image/webp", "video/mp4", "video/quicktime", "video/webm"].includes(file.mime) || !Number.isSafeInteger(file.size) || file.size < 1 || file.size > (file.mime.startsWith("image/") ? 8 * 1024 * 1024 : maxTotal) || typeof file.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(file.sha256)) fail2("INVALID_MEDIA", "Invalid file manifest.");
         total += file.size;
         if (total > maxTotal) fail2("MEDIA_SIZE_LIMIT", "The total byte limit is 64 MiB.");
-        if (!accepts(input, file)) fail2("MEDIA_INPUT_TYPE_UNSUPPORTED", "The file input does not accept this media type.");
         return { name: file.name, mime: file.mime, size: file.size, sha256: file.sha256 };
       });
+      const expectedGeneration = generation, expectedManualEpoch = manualEpoch;
+      watchManualTakeover();
+      let binding;
+      if (command.compose !== void 0) {
+        opening = true;
+        try {
+          binding = await openMediaComposer(command.compose, verifiedAccount);
+        } finally {
+          opening = false;
+        }
+      }
+      if (generation !== expectedGeneration) fail2("MEDIA_CANCELLED", "The transfer was cancelled while opening its composer.");
+      if (manualEpoch !== expectedManualEpoch) fail2("MEDIA_COMPOSER_CHANGED", "Manual interaction took ownership of the composer.");
+      if (account() !== verifiedAccount) fail2("ACCOUNT_MISMATCH", "The selected account changed.");
+      const { dialog, editor, input } = composer();
+      if (binding && (binding.scope !== dialog || binding.editor !== editor)) fail2("MEDIA_COMPOSER_CHANGED", "The opened composer was replaced.");
+      if (manifests.length > 1 && !input.multiple) fail2("MEDIA_MULTIPLE_UNSUPPORTED", "The selected file input does not accept multiple files.");
+      if (manifests.some((file) => !accepts(input, file))) fail2("MEDIA_INPUT_TYPE_UNSUPPORTED", "The file input does not accept this media type.");
       const id2 = crypto.randomUUID();
       transfer = {
         id: id2,
@@ -591,6 +625,8 @@ var ThreadsMCP = (() => {
         editor,
         input,
         fingerprint: fingerprint(dialog, editor, input),
+        manualEpoch,
+        binding,
         files: manifests.map((manifest) => ({ manifest, bytes: new Uint8Array(manifest.size), received: 0 }))
       };
       return { uploadId: id2, expiresInMs: 3e5, maxChunkBytes: 32 * 1024 };
@@ -639,7 +675,9 @@ var ThreadsMCP = (() => {
       editor: current2.editor,
       attachmentScope: attachmentScope(current2.dialog, current2.editor),
       input: current2.input,
-      files: [...data.files]
+      files: [...data.files],
+      manualEpoch: current2.manualEpoch,
+      binding: current2.binding
     };
     const result = {
       status: "staged",
@@ -667,7 +705,7 @@ var ThreadsMCP = (() => {
     if (expiryTimer !== void 0) window.clearTimeout(expiryTimer);
     expiryTimer = void 0;
   }
-  function watchManualTakeover(expectedGeneration) {
+  function watchManualTakeover2(expectedGeneration) {
     const events = ["pointerdown", "mousedown", "touchstart", "keydown", "beforeinput", "input", "paste", "cut", "drop", "wheel"];
     const onInteraction = (event) => {
       if (event.isTrusted && generation2 === expectedGeneration) cancelSocialActions();
@@ -1010,12 +1048,76 @@ var ThreadsMCP = (() => {
   function textMatches(card, text2) {
     return [...card.querySelectorAll('p,[dir="auto"]')].filter(isVisible).some((el) => el.innerText.replace(/\r\n/g, "\n") === text2.replace(/\r\n/g, "\n"));
   }
+  async function openEmptyComposer(request, expectedGeneration, expectedAccount) {
+    const check2 = () => {
+      assertGeneration(expectedGeneration);
+      if (context(request).account !== expectedAccount) fail3("ACCOUNT_MISMATCH", "The account changed while opening the composer.");
+    };
+    check2();
+    if (overlays().length || editors(document).some((el) => editorValue(el).trim() || hasAttachments(el.parentElement, el))) fail3("EXISTING_DRAFT", "An existing draft or dialog is present; leave it intact and resolve it manually.");
+    let targetScope, expectedReply;
+    if (request.kind === "publish") {
+      only(controls(document).filter((el) => /^(Create|New thread|新增|建立|新串文)$/i.test(name(el))), "A unique new-thread control is required.").click();
+    } else {
+      const card = postCard(request.targetUrl);
+      targetScope = card;
+      if (request.kind === "reply") {
+        expectedReply = targetEvidence(card, request.targetUrl);
+        only(controls(card).filter((el) => /^(Reply|Replied|回覆|已回覆)(?:\s*\d[\d.,]*(?:\s*[萬万億KMB])?)?$/i.test(name(el))), "A unique Reply control in the exact target post is required.").click();
+      } else {
+        const binding = await menuFor(request, expectedGeneration);
+        targetScope = binding.card;
+        check2();
+        only(controls(binding.menu).filter((el) => /^(Quote|Quote post|引用|引用貼文)$/i.test(name(el))), "A unique Quote menu action is required.").click();
+      }
+    }
+    const scope = await waitFor(() => {
+      check2();
+      const dialogs = overlays().filter((el) => el.getAttribute("role") === "dialog" && editors(el).length === 1);
+      return dialogs.length === 1 ? dialogs[0] : void 0;
+    });
+    check2();
+    const editor = only(editors(scope), "The composer needs exactly one text editor.");
+    if (editorValue(editor).trim()) fail3("EXISTING_DRAFT", "The opened composer contains a draft; it was not replaced.");
+    if (hasAttachments(scope, editor)) fail3("EXISTING_MEDIA", "Existing composer media was not authorized.");
+    let replyPreview;
+    if (request.kind !== "publish" && !links(scope).some((link) => link.url === request.targetUrl)) {
+      const preview = request.kind === "reply" ? matchingReplyPreview(scope, editor, request.targetUrl, expectedReply) : void 0;
+      if (!preview || !expectedReply) fail3("TARGET_UNVERIFIED", "The composer needs an exact target permalink or a reply preview matching the original post.");
+      replyPreview = { element: preview, evidence: expectedReply };
+    }
+    return { request: { kind: request.kind, targetUrl: request.targetUrl }, account: expectedAccount, scope, editor, targetScope, replyPreview };
+  }
+  async function openMediaComposer(input, expectedAccount) {
+    if (!input || !["publish", "reply", "quote"].includes(input.kind) || typeof input.targetUrl !== "string") fail3("INVALID_INPUT", "A fixed publish, reply or quote target is required.");
+    const request = requestChecked(input, true);
+    if (context(request).account !== expectedAccount.toLowerCase()) fail3("ACCOUNT_MISMATCH", "The selected account does not match.");
+    cancelSocialActions();
+    const expectedGeneration = generation2;
+    watchManualTakeover2(expectedGeneration);
+    try {
+      return await openEmptyComposer(request, expectedGeneration, expectedAccount.toLowerCase());
+    } finally {
+      if (generation2 === expectedGeneration) cancelSocialActions();
+    }
+  }
+  function assertMediaComposerBinding(binding, request) {
+    if (request && (request.kind !== binding.request.kind || request.targetUrl !== binding.request.targetUrl)) fail3("MEDIA_TARGET_MISMATCH", "The staged media belongs to another publication target.");
+    if (context(binding.request).account !== binding.account) fail3("ACCOUNT_MISMATCH", "The selected account changed.");
+    const { scope, editor } = binding;
+    if (overlays().length !== 1 || overlays()[0] !== scope || !isVisible(scope) || !isVisible(editor) || !scope.contains(editor) || editors(scope).length !== 1 || editors(scope)[0] !== editor)
+      fail3("MEDIA_COMPOSER_CHANGED", "The original media composer changed.");
+    if (binding.request.kind !== "publish" && !links(scope).some((link) => link.url === binding.request.targetUrl)) {
+      if (!binding.targetScope?.isConnected || !binding.replyPreview || matchingReplyPreview(scope, editor, binding.request.targetUrl, binding.replyPreview.evidence) !== binding.replyPreview.element)
+        fail3("TARGET_CHANGED", "The original reply preview or quote target changed.");
+    }
+  }
   async function socialStage(input) {
     const request = requestChecked(input);
     const ctx = context(request);
     cancelSocialActions();
     const expectedGeneration = generation2;
-    watchManualTakeover(expectedGeneration);
+    watchManualTakeover2(expectedGeneration);
     try {
       const beforeUrls = new Set(links().map((link) => link.url));
       let scope;
@@ -1028,29 +1130,19 @@ var ThreadsMCP = (() => {
       if (isCompose) {
         if (request.mediaToken) {
           scope = only(overlays().filter((el) => el.getAttribute("role") === "dialog"), "Approved media must be in exactly one composer dialog.");
-          assertApprovedMedia(request.mediaToken, scope);
-        } else {
-          if (overlays().length || editors(document).some((el) => editorValue(el).trim())) fail3("EXISTING_DRAFT", "An existing draft or dialog is present; leave it intact and resolve it manually.");
-          if (request.kind === "publish") {
-            only(controls(document).filter((el) => /^(Create|New thread|新增|建立|新串文)$/i.test(name(el))), "A unique new-thread control is required.").click();
-          } else {
-            const card = postCard(request.targetUrl);
-            targetScope = card;
-            if (request.kind === "reply") expectedReply = targetEvidence(card, request.targetUrl);
-            if (request.kind === "reply") only(controls(card).filter((el) => /^(Reply|Replied|回覆|已回覆)(?:\s*\d[\d.,]*(?:\s*[萬万億KMB])?)?$/i.test(name(el))), "A unique Reply control in the exact target post is required.").click();
-            else {
-              const binding = await menuFor(request, expectedGeneration);
-              targetScope = binding.card;
-              const menu = binding.menu;
-              assertGeneration(expectedGeneration);
-              only(controls(menu).filter((el) => /^(Quote|Quote post|引用|引用貼文)$/i.test(name(el))), "A unique Quote menu action is required.").click();
-            }
+          const binding = assertApprovedMedia(request.mediaToken, scope);
+          if (binding) {
+            assertMediaComposerBinding(binding, request);
+            targetScope = binding.targetScope;
+            replyPreview = binding.replyPreview;
+            expectedReply = binding.replyPreview?.evidence;
           }
-          scope = await waitFor(() => {
-            assertGeneration(expectedGeneration);
-            const ds = overlays().filter((el) => el.getAttribute("role") === "dialog" && editors(el).length === 1);
-            return ds.length === 1 ? ds[0] : void 0;
-          });
+        } else {
+          const binding = await openEmptyComposer(request, expectedGeneration, ctx.account);
+          scope = binding.scope;
+          targetScope = binding.targetScope;
+          replyPreview = binding.replyPreview;
+          expectedReply = binding.replyPreview?.evidence;
         }
         assertGeneration(expectedGeneration);
         context(request);
@@ -1220,8 +1312,8 @@ var ThreadsMCP = (() => {
   function directProfile2(args) {
     return directProfile(args, { viewer: () => viewer().username, guard: guard2 });
   }
-  var runtimeVersion = "0.5.0";
-  var runtimeRevision = "20261106-direct-profile-1";
+  var runtimeVersion = "0.6.0";
+  var runtimeRevision = "20261106-remote-media-1";
   var current;
   function routeKey(value) {
     try {
@@ -1959,7 +2051,7 @@ var ThreadsMCP = (() => {
     const isProfileSearch = location.pathname === "/search" && new URL(location.href).searchParams.get("filter") === "profiles";
     const profiles = new Map((documentMatches && !isProfileSearch ? parsed.profiles : []).map((profile) => [profile.username.toLowerCase(), profile]));
     for (const profile of searchProfiles()) if (!profiles.has(profile.username.toLowerCase())) profiles.set(profile.username.toLowerCase(), profile);
-    return { runtimeVersion, runtimeRevision, url: location.href, title: document.title, posts: merged, profiles: [...profiles.values()], replies, dialogUsers: dialogUsers(dialog), dialogState: readDialogState(dialog), composerState: readComposerState(), postActivity: postActivity(dialog), notificationRows: notificationRows(), visibilityState: document.visibilityState, viewer: viewer(), text: pageText, warnings, observedAt, runtimeDiagnostics: runtimeDiagnostics(dialog) };
+    return { runtimeVersion, runtimeRevision, remoteMediaVersion: 1, url: location.href, title: document.title, posts: merged, profiles: [...profiles.values()], replies, dialogUsers: dialogUsers(dialog), dialogState: readDialogState(dialog), composerState: readComposerState(), postActivity: postActivity(dialog), notificationRows: notificationRows(), visibilityState: document.visibilityState, viewer: viewer(), text: pageText, warnings, observedAt, runtimeDiagnostics: runtimeDiagnostics(dialog) };
   }
   return __toCommonJS(page_runtime_exports);
 })();

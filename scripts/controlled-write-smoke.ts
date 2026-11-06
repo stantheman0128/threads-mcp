@@ -4,16 +4,17 @@ import {readFileSync,writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {getConfig} from '../src/config.js';
 import {RemoteExtensionDriver} from '../src/remote-driver.js';
+const expectedMedia=process.env.THREADS_HTTP_EXPECT_MEDIA==='true';
 const config=getConfig();const endpoint=new URL(process.env.THREADS_REMOTE_URL??'http://127.0.0.1:19759/mcp');
 if((endpoint.protocol!=='https:'&&!(endpoint.protocol==='http:'&&endpoint.hostname==='127.0.0.1'))||endpoint.username||endpoint.password||endpoint.search)throw Error('Invalid endpoint');
-const client=new Client({name:'controlled-write-noop-acceptance',version:'0.5.1'});
+const client=new Client({name:'controlled-write-noop-acceptance',version:'0.6.0'});
 const driver=new RemoteExtensionDriver({dataDir:config.dataDir,port:Number(process.env.THREADS_BRIDGE_PORT??19758)});
 const report:any={status:'FAIL',publicMutations:0,startedAt:new Date().toISOString()};let restore:string|undefined,phase='connect';
 async function call(name:string,args:any={}){phase=name;const response=await client.callTool({name,arguments:args},undefined,{timeout:90000});if(response.isError){let code='REMOTE_FAILED';try{code=JSON.parse((response.content[0] as any).text).error;}catch{}throw Object.assign(new Error('Remote failed'),{code});}return response.structuredContent as any;}
 try{
  await driver.connect();const page=await driver.command<any>({type:'read'});assert.ok(page.viewer.username);assert.ok(!page.composerState?.present);restore=page.url;
  const token=readFileSync(join(config.dataDir,'remote-access.token'),'utf8').trim();await client.connect(new StreamableHTTPClientTransport(endpoint,{requestInit:{headers:{Authorization:`Bearer ${token}`}}}));
- const list=await client.listTools();assert.equal(list.tools.length,18);report.tools=18;
+ const list=await client.listTools();assert.equal(list.tools.length,expectedMedia?19:18);report.tools=list.tools.length;
  for(const name of ['threads_execute_action','threads_stage_media','threads_export','threads_get_feed','threads_run_schedules','threads_api_execute'])assert.ok(!list.tools.some(t=>t.name===name));
  const status=await call('threads_status');assert.equal(status.writesEnabled,true);assert.equal(status.remoteReadOnly,false);report.writesEnabled=true;
  const account=page.viewer.username;

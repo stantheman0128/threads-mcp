@@ -10,6 +10,7 @@ import {ThreadsError} from './types.js';
 import {remoteHealth} from './remote-health.js';
 import {validateDirectProfileCommand} from './direct-profile-command.js';
 import {RemoteSocialController} from './remote-social.js';
+import {RemoteMediaController} from './remote-media.js';
 
 const MAX_BODY=64*1024;
 const validToken=(value:string)=>/^[A-Za-z0-9_-]{43,128}$/.test(value);
@@ -61,8 +62,10 @@ function safeReadUrl(value:unknown):boolean{
   }catch{return false;}
 }
 
-export async function startRemoteHttp(service:ThreadsService,options:{port:number;readToken:()=>string;controlledWrites?:boolean;socialDriver?:BrowserDriver}){
+export async function startRemoteHttp(service:ThreadsService,options:{port:number;readToken:()=>string;controlledWrites?:boolean;controlledMedia?:boolean;socialDriver?:BrowserDriver}){
+  if(!Number.isInteger(options.port)||options.port<0||options.port>65535)throw new Error('Invalid remote HTTP port.');
   if(service.config.writesEnabled!==!!options.controlledWrites)throw new Error('Remote HTTP writes require explicit matching controlled mode.');
+  if(options.controlledMedia&&!options.controlledWrites)throw new Error('Remote media requires explicitly enabled remote writes.');
   if(options.controlledWrites&&!options.socialDriver)throw new Error('Controlled mode requires a local context driver.');
   let credentialEpoch:string|undefined;
   let requestCredential:string|undefined;
@@ -70,12 +73,13 @@ export async function startRemoteHttp(service:ThreadsService,options:{port:numbe
   const assertAccess=()=>{
     let current:string|undefined;try{current=options.readToken();}catch{}
     if(!current||!validToken(current)||current!==credentialEpoch||current!==requestCredential){
-      social?.invalidatePrepared();
+      invalidate();
       throw new ThreadsError('ACCESS_CHANGED','Remote credentials changed; preparation is invalid.');
     }
   };
-  const social=options.controlledWrites?new RemoteSocialController(service,options.socialDriver!,assertAccess):undefined;
-  if(!Number.isInteger(options.port)||options.port<0||options.port>65535)throw new Error('Invalid remote HTTP port.');
+  const media=options.controlledMedia?new RemoteMediaController(service,options.socialDriver!,assertAccess):undefined;
+  const social=options.controlledWrites?new RemoteSocialController(service,options.socialDriver!,assertAccess,media?(request,account)=>media.authorize(request,account):undefined):undefined;
+  function invalidate(){social?.invalidatePrepared();media?.invalidate();}
   // A revoked/missing token leaves HTTP alive but fails closed, even under a supervisor.
   let busy=false;
   const send=(res:ServerResponse,status:number,error:string)=>{res.writeHead(status,{'Content-Type':'application/json'}).end(JSON.stringify({error}));};
@@ -84,21 +88,21 @@ export async function startRemoteHttp(service:ThreadsService,options:{port:numbe
     // cloudflared must override Host to this exact loopback authority. No browser origins/CORS.
     const address=http.address();const port=typeof address==='object'&&address?address.port:options.port;
     if(req.headers.host!==`127.0.0.1:${port}`||req.headers.origin||req.headers['sec-fetch-site']==='cross-site'){send(res,403,'Forbidden');return;}
-    let token:string;try{token=options.readToken();}catch{social?.invalidatePrepared();credentialEpoch=undefined;send(res,503,'Access disabled');return;}
-    if(credentialEpoch!==token){social?.invalidatePrepared();credentialEpoch=token;}
+    let token:string;try{token=options.readToken();}catch{invalidate();credentialEpoch=undefined;send(res,503,'Access disabled');return;}
+    if(credentialEpoch!==token){invalidate();credentialEpoch=token;}
     const auth=req.headers.authorization??'';const expected=`Bearer ${token}`;
-    if(!validToken(token)){social?.invalidatePrepared();send(res,503,'Access disabled');return;}
+    if(!validToken(token)){invalidate();send(res,503,'Access disabled');return;}
     if(Buffer.byteLength(auth)!==Buffer.byteLength(expected)||!timingSafeEqual(Buffer.from(auth),Buffer.from(expected))){
       res.setHeader('WWW-Authenticate','Bearer realm="threads-mcp"');send(res,401,'Unauthorized');return;
     }
     if(req.url==='/healthz'&&req.method==='GET'){
-      const health=await remoteHealth(service,!busy);res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify({...health,busy}));return;
+      const health=await remoteHealth(service,!busy);res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify({...health,mediaEnabled:!!media,busy}));return;
     }
     if(req.url!=='/mcp'){send(res,404,'Not found');return;}
     if(req.method!=='POST'){res.setHeader('Allow','POST');send(res,405,'Use MCP JSON POST');return;}
     if(!/^application\/json(?:\s*;|$)/i.test(req.headers['content-type']??'')){send(res,415,'JSON required');return;}
     if(Number(req.headers['content-length']??0)>MAX_BODY){send(res,413,'Request too large');return;}
-    if(busy){res.setHeader('Retry-After','3');send(res,429,'Another remote read is in progress');return;}
+    if(busy){res.setHeader('Retry-After','3');send(res,429,'Another remote request is in progress');return;}
     // Held through response-body completion, across all nested research operations.
     busy=true;requestCredential=token;let server:ReturnType<typeof createServer>|undefined;
     try{
@@ -110,8 +114,8 @@ export async function startRemoteHttp(service:ThreadsService,options:{port:numbe
       if(!parsed||typeof parsed!=='object'||Array.isArray(parsed)){send(res,400,'One MCP message per request is required');return;}
       // A slow request authenticated with A cannot inherit a later B credential epoch.
       let currentToken:string|undefined;try{currentToken=options.readToken();}catch{}
-      if(currentToken!==token||credentialEpoch!==token){social?.invalidatePrepared();send(res,401,'Authorization changed');return;}
-      server=createServer(service,{remoteReadOnly:!social,remoteSocial:social});
+      if(currentToken!==token||credentialEpoch!==token){invalidate();send(res,401,'Authorization changed');return;}
+      server=createServer(service,{remoteReadOnly:!social,remoteSocial:social,remoteMedia:media});
       const transport=new WebStandardStreamableHTTPServerTransport({sessionIdGenerator:undefined,enableJsonResponse:true,maxRequestBodySize:MAX_BODY});
       await server.connect(transport);
       const headers=new Headers();for(const name of ['accept','content-type','mcp-protocol-version','mcp-session-id']){const v=req.headers[name];if(typeof v==='string')headers.set(name,v);}
@@ -123,7 +127,7 @@ export async function startRemoteHttp(service:ThreadsService,options:{port:numbe
   }
   const http=createHttpServer({maxHeaderSize:16*1024,requestTimeout:15_000,headersTimeout:10_000},(req,res)=>{void handle(req,res).catch(()=>{if(!res.headersSent)send(res,500,'Remote request failed');else res.end();});});
   http.maxConnections=16;
-  http.once('close',()=>social?.invalidatePrepared());
+  http.once('close',()=>{social?.invalidatePrepared();media?.close();});
   await new Promise<void>((resolve,reject)=>{http.once('error',reject);http.listen(options.port,'127.0.0.1',()=>{http.off('error',reject);resolve();});});
   return http;
 }

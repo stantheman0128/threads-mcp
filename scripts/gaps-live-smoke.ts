@@ -10,7 +10,7 @@ async function call(name:string,args:Record<string,unknown>={}){const result=awa
 async function check(name:string,run:()=>Promise<unknown>){try{const result=await run();report.checks[name]={status:'PASS',result};console.log(JSON.stringify({check:name,result}));}catch(error){report.checks[name]={status:'FAIL',error:String(error)};console.log(JSON.stringify({check:name,error:String(error)}));}}
 try{
   await client.connect(transport);const page=await call('threads_read_page');
-  if(page.runtimeVersion!=='0.5.0'||page.extensionVersion!=='0.5.0')throw new Error(`Expected runtime and extension 0.5.0; received ${page.runtimeVersion}/${page.extensionVersion}`);
+  if(page.runtimeVersion!=='0.6.0'||page.extensionVersion!=='0.6.0')throw new Error(`Expected runtime and extension 0.6.0; received ${page.runtimeVersion}/${page.extensionVersion}`);
   const account=page.viewer.username;if(!account)throw new Error('No observed account.');
   report.checks.runtime={status:'PASS',version:page.runtimeVersion};
   await check('browser-account-insights',async()=>{const r=await call('threads_account_insights',{account,includeHistory:true});if(r.state!=='observed-summary')throw new Error('Summary not observed');return {state:r.state,period:r.periodLabel,knownMetrics:Object.entries(r.metrics).filter(([,v]:any)=>v.value!==null).map(([k])=>k),history:r.history.length,sourceUrl:r.sourceUrl};});

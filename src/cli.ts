@@ -31,15 +31,17 @@ async function main(){
     const driver=new RemoteExtensionDriver({dataDir:config.dataDir,port:bridgePort});
     await driver.refreshStatus(); // HTTP stays available for diagnostics while the bridge is down.
     const controlledWrites=process.env.THREADS_REMOTE_ALLOW_WRITES==='true';
+    const controlledMedia=process.env.THREADS_REMOTE_ALLOW_MEDIA==='true';
+    if(controlledMedia&&!controlledWrites)throw new Error('THREADS_REMOTE_ALLOW_MEDIA requires THREADS_REMOTE_ALLOW_WRITES=true.');
     const remoteConfig={...config,writesEnabled:controlledWrites,dataDir:join(config.dataDir,'remote-index')};
     const service=new ThreadsService(new RemoteReadDriver(driver),new SearchIndex(remoteConfig.dataDir),remoteConfig);
     const tokenPath=ensureRemoteToken(config.dataDir);
-    const http=await startRemoteHttp(service,{port,readToken:()=>readFileSync(tokenPath,'utf8').trim(),controlledWrites,socialDriver:controlledWrites?driver:undefined});
+    const http=await startRemoteHttp(service,{port,readToken:()=>readFileSync(tokenPath,'utf8').trim(),controlledWrites,controlledMedia,socialDriver:controlledWrites?driver:undefined});
     console.error(`Threads ${controlledWrites?'controlled-write':'read-only'} HTTP: http://127.0.0.1:${port}/mcp (independent token stored in private data directory)`);
     let stopping=false;const stop=async()=>{if(stopping)return;stopping=true;http.close();http.closeAllConnections();await service.close();process.exit(0);};
     process.once('SIGINT',stop);process.once('SIGTERM',stop);return;
   }
-  if(command==='help'||command==='--help'){console.log('Threads MCP\n  serve   Start MCP stdio server (extension by default)\n  serve-http  Start authenticated HTTP (read-only unless remote writes explicitly enabled)\n  remote-token rotate|revoke  Manage remote bearer without printing it\n  bridge  Start standalone extension pairing host\n  login   Open a dedicated Chrome profile\n  schedule-worker <username> [--once] [--api]  Execute authorized due jobs (selected browser by default)\nEnvironment: THREADS_PROVIDER=extension|dedicated, THREADS_DATA_DIR, THREADS_BRIDGE_PORT, THREADS_ALLOW_WRITES=true, THREADS_REMOTE_ALLOW_WRITES=true (HTTP named social only), THREADS_API_ACCESS_TOKEN, THREADS_API_USER_ID');return;}
+  if(command==='help'||command==='--help'){console.log('Threads MCP\n  serve   Start MCP stdio server (extension by default)\n  serve-http  Start authenticated HTTP (read-only unless remote writes explicitly enabled)\n  remote-token rotate|revoke  Manage remote bearer without printing it\n  bridge  Start standalone extension pairing host\n  login   Open a dedicated Chrome profile\n  schedule-worker <username> [--once] [--api]  Execute authorized due jobs (selected browser by default)\nEnvironment: THREADS_PROVIDER=extension|dedicated, THREADS_DATA_DIR, THREADS_BRIDGE_PORT, THREADS_ALLOW_WRITES=true, THREADS_REMOTE_ALLOW_WRITES=true (HTTP named social), THREADS_REMOTE_ALLOW_MEDIA=true (requires remote writes), THREADS_API_ACCESS_TOKEN, THREADS_API_USER_ID');return;}
   if(command==='schedule-worker'){
     const accountId=process.argv[3];if(!accountId||accountId.startsWith('--'))throw new Error('schedule-worker requires an exact account ID or username.');
     if(!config.writesEnabled)throw new Error('schedule-worker requires THREADS_ALLOW_WRITES=true.');
