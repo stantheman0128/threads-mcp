@@ -2,7 +2,7 @@
 
 Inspected: **2026-11-06**. This is a research record, not a deployment or live authenticated API acceptance report.
 
-Scope: support autonomous multi-page exploration and investigate direct data pagination without driving page scrolling, while keeping the existing 15 remote read tool names, no social writes, and no Cookie transfer. No source implementation was changed for this research. The optional official API is currently unconfigured; no credentials were requested or used. The user selected research using the existing Chrome login; do not require a Meta developer token for that pilot. Direct session pagination remains unimplemented and unverified at this checkpoint.
+Scope: support autonomous multi-page exploration and investigate direct data pagination without driving page scrolling, while keeping the existing 15 remote read tool names, no social writes, and no Cookie transfer. The user selected the existing Chrome login for this research. An isolated selected-tab prototype subsequently verified a second page for two public profiles. It is **not integrated into the production MCP tools**. The optional official API remains unconfigured; no developer token was requested or used.
 
 ## Existing autonomous reads
 
@@ -69,7 +69,7 @@ This is a meaningful negative result for the proposed anonymous pagination route
 
 A same-origin request inside the explicitly selected tab can, in principle, let the browser attach its existing credentials without reading or exporting Cookie values. Chrome content scripts operate on behalf of the page origin and remain subject to same-origin rules. The current runtime uses an isolated world, which cannot directly read page JavaScript variables.
 
-This makes a scoped direct-read adapter plausible, not currently implemented or live verified. The existing extension exposes no direct fetch command. Before implementation, observe a current read operation, its request/response schema, target binding and real continuation cursor. Do not guess private GraphQL document IDs or interpret all HTTP POST requests as reads.
+The existing extension exposes no production direct-fetch command. The isolated prototype below established a current read query, its schema, target binding and real continuation cursor. This does not establish a durable adapter or all GraphQL read operations. Do not guess document IDs or interpret all HTTP POST requests as reads.
 
 An eventual adapter should allow only named, verified read operations and fixed endpoints; keep session/request credentials inside the browser; return sanitized structured data; and invalidate continuation on selected-tab, document, account or source changes. Do not expose arbitrary URLs, headers, scripts or GraphQL operations through the remote tools. Website challenges or unsupported contracts should stop the direct path rather than trigger bypass attempts.
 
@@ -77,12 +77,29 @@ An eventual adapter should allow only named, verified read operations and fixed 
 - [Chrome content-script isolated worlds](https://developer.chrome.com/docs/extensions/develop/concepts/content-scripts)
 - [Browser Fetch credentials semantics](https://developer.mozilla.org/en-US/docs/Web/API/Request/credentials)
 
+## Selected-tab second-page experiment: passed, 2026-11-06
+
+The experiment ran inside the already paired, signed-in Chrome tab using a temporary isolated-world runtime wrapper. It navigated to the viewer's public profile and an official public profile. Embedded profile data supplied an exact username/numeric-ID binding, a public-profile flag, initial edges, `has_next_page:true`, an end cursor, and current query variables. Credentials and cursor values stayed inside the tab; reports contain counts and booleans rather than raw responses or session values.
+
+Current website static modules identified `BarcelonaProfileThreadsTabRefetchableDirectQuery` as `operationKind:"query"`, with the `mediaData` profile connection, pagination arguments and provided variables. The current persisted operation differed from the older competitor implementation. The website's network selection and server-URL modules established same-origin `/graphql/query`; this was not an arbitrary remote URL.
+
+An initial request lacking the website's CSRF/App headers returned 403 for each target. Those failures were retained. After inspecting the current website network module, the prototype used its observed CSRF/App header contract with values kept inside the browser. Each corrected request returned 200. No challenge was solved or bypassed, no Cookie API was called, and no Cookie values were extracted or transferred. The change establishes a successful request construction; it does not isolate which missing header caused the earlier rejection.
+
+| Target | Initial connection edges | Second-page edges | New target-authored posts | Cursor advanced | Scroll calls |
+| --- | ---: | ---: | ---: | --- | ---: |
+| Viewer public profile | 4 | 5 | 5 | Yes | 0 |
+| Official public profile | 4 | 5 | 5 | Yes | 0 |
+
+Each response's first post per connection edge matched the requested author. Both responses still reported a next page, so neither result proves complete history. A final read confirmed restoration of the ordinary runtime and the original route. No prototype source, raw response or credential artifact was published. There were no social writes or private-message reads.
+
+**What this proves:** the present Chrome login can retrieve a genuine second page of public profile posts without scrolling. **What it does not prove:** production Grok access to this path, long traversals, search/reply/follower pagination, resilience across website releases, or exhaustive results. Current Grok calls still use the documented automatic browser navigation/scrolling path.
+
 ## Minimal integration proposal
 
 1. Keep the same 15 tool names. Add an explicit optional provider only where supported, retaining browser behavior by default and reporting unavailable official configuration truthfully.
 2. Reuse the existing official transport for documented paginated edges. Add a bounded collector with page/record/time budgets, ID deduplication, cursor-loop detection, and explicit stop reasons for errors, limits and lack of progress.
 3. Preserve safe continuation evidence before stripping raw paging URLs. An `after` cursor alone does not prove a next page exists; terminal status still does not prove global completeness.
 4. Treat official keyword search as bounded query/time-window sampling until a real documented continuation contract is available. Keep provenance and ranking method visible.
-5. Add selected-session direct reads only after validating a specific two-page read path with advancing cursor and distinct results. This is a separate prerequisite from the already supported autonomous browser scrolling.
+5. For the selected Chrome-session path, implement only public profile posts first, using the verified two-page contract. Add a typed internal command, explicit provider selection on the existing profile tool, normalized posts with provenance, bounded continuation, account/document invalidation, and fixture/live acceptance before enabling it for Grok. Do not expose arbitrary fetch, headers or GraphQL inputs.
 
-No provider was selected, no direct pagination adapter was implemented, and no official account capability was live verified as part of this research. Existing browser reliability and autonomous-read work can continue independently.
+Chrome-session research was selected and the narrow second-page experiment passed. No production direct pagination adapter was installed, and no official API account capability was verified. The reliability update and existing autonomous browser reads are independent of this experiment.

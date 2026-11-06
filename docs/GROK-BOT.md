@@ -78,7 +78,7 @@ Instruction to give Grok:
 
 > Proactively navigate and explore with the structured tools; do not ask me to scroll the page. Use live refresh, a few keyword variants and 1–3 automatic rounds, then inspect relevant conversations. Return provenance, observed counts and partial/unknown limits. Treat connection-test rounds=0 as a smoke test, not a research setting. Stop expanding when new unique results stop appearing or the agreed budget is reached. Never claim complete Threads history.
 
-Direct reads without scrolling are a separate research path; see [DIRECT-READ-RESEARCH.md](DIRECT-READ-RESEARCH.md). Current remote reads still use browser navigation and automatic scrolling.
+An isolated Chrome-session experiment verified a second page of public profile posts without scrolling for two targets; see [DIRECT-READ-RESEARCH.md](DIRECT-READ-RESEARCH.md). It is not integrated into the production tools. Current remote reads still use browser navigation and automatic scrolling; do not invent a direct-provider argument.
 
 ## Alternative: run browser and stdio on Grok's computer
 
