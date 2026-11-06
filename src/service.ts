@@ -8,6 +8,7 @@ import { dedupePosts } from './parser.js';
 import { handle, threadsUrl, profileUrl, postTarget, sameId } from './urls.js';
 import { ThreadsError, type Profile } from './types.js';
 import type { PageRead, PageSnapshot, PostActivityEvidence } from './page-runtime.js';
+import type { DirectProfileResult } from './direct-profile-types.js';
 
 type Action = {snapshotId:string;ref:string;verb:'click'|'fill'|'press'|'select'|'check';value?:string;purpose:string};
 type Prepared = {id:string;args:Action;account:string;url:string;expires:number;target:unknown};
@@ -121,8 +122,20 @@ export class ThreadsService {
     const contextual=result.posts.filter(p=>p.code!==target.code&&!replies.some(r=>sameId(r.id,p.id)||r.code===p.code));
     return {items:replies,unclassifiedVisiblePosts:contextual,root:root??null,...this.meta(result),warnings:[...result.warnings,'Unclassified visible posts are not asserted to be replies.']};
   });}
-  profile(username:string,section='posts',rounds=0){return this.serial(async()=>{
+  profile(username:string,section='posts',rounds=0,options:{provider?:'browser'|'direct';maxPages?:number;pageSize?:number}={}){return this.serial(async()=>{
     const name=handle(username);const suffix=section==='posts'?'':`/${section}`;
+    if(options.provider==='direct'){
+      const maxPages=options.maxPages??3,pageSize=options.pageSize??10;
+      if(section!=='posts'||!Number.isInteger(maxPages)||maxPages<1||maxPages>5||!Number.isInteger(pageSize)||pageSize<1||pageSize>20)
+        throw new ThreadsError('INVALID_INPUT','Direct reads support public profile posts only, 1-5 pages and 1-20 posts per requested page.');
+      const source=profileUrl(name);
+      await this.go(source);
+      const result=await this.driver.command<DirectProfileResult>({type:'direct_profile',username:name,maxPages,pageSize});
+      if(!sameThreadsRoute(result.sourceUrl,source)||result.items.some(p=>p.author.username.toLowerCase()!==name||p.source!=='profile-direct'))
+        throw new ThreadsError('SOURCE_CHANGED','Direct profile result did not match the requested source.');
+      this.index.upsert(result.items);
+      return result;
+    }
     const result=await this.capture(profileUrl(name)+suffix,rounds);
     const profile=result.pages.flatMap(p=>p.profiles).find(p=>p.username.toLowerCase()===name)??null;
     const items=section==='reposts'?result.posts:result.posts.filter(p=>p.author.username.toLowerCase()===name&&

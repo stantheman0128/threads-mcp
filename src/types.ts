@@ -1,5 +1,5 @@
 export type Completeness = 'partial' | 'unknown' | 'complete';
-export type ReadSource = 'browser-json' | 'browser-dom' | 'public-html' | 'local-index';
+export type ReadSource = 'browser-json' | 'browser-dom' | 'profile-direct' | 'public-html' | 'local-index';
 export interface Author { username: string; id?: string; name?: string; verified?: boolean; }
 export interface Post {
   id: string;

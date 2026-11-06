@@ -1,9 +1,15 @@
 import { dedupePosts, parsePayloads, parseWire, parseCount } from './parser.js';
 import type { Post, Profile } from './types.js';
+import { directProfile as collectDirectProfile } from './direct-profile-runtime.js';
+import type { DirectProfileArgs } from './direct-profile-types.js';
+export { cancelDirectProfiles } from './direct-profile-runtime.js';
+export function directProfile(args: DirectProfileArgs) {
+  return collectDirectProfile(args, { viewer: () => viewer().username, guard });
+}
 export {socialStage,socialCommit,socialInspect,cancelSocialActions} from './social-runtime.js';
 export {media,cancelMediaTransfers} from './media-runtime.js';
-export const runtimeVersion='0.4.2';
-export const runtimeRevision='20261024-readiness-3';
+export const runtimeVersion='0.5.0';
+export const runtimeRevision='20261106-direct-profile-1';
 
 export interface ElementRef { ref: string; role: string; name: string; text: string; href?: string; editable: boolean; checked?: boolean; context: string; }
 export interface PageSnapshot { snapshotId: string; url: string; title: string; viewer: { username: string | null }; elements: ElementRef[]; text: string; }

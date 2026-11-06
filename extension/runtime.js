@@ -21,8 +21,10 @@ var ThreadsMCP = (() => {
   // src/page-runtime.ts
   var page_runtime_exports = {};
   __export(page_runtime_exports, {
+    cancelDirectProfiles: () => cancelDirectProfiles,
     cancelMediaTransfers: () => cancelMediaTransfers,
     cancelSocialActions: () => cancelSocialActions,
+    directProfile: () => directProfile2,
     interact: () => interact,
     media: () => media,
     openReadPanel: () => openReadPanel,
@@ -201,12 +203,273 @@ var ThreadsMCP = (() => {
     return Math.round(Number(match[1]) * (scale[(match[2] || "").toLowerCase()] || 1));
   }
 
+  // src/direct-profile-runtime.ts
+  var active = /* @__PURE__ */ new Set();
+  var queryName = "BarcelonaProfileThreadsTabRefetchableDirectQuery";
+  var totalBudgetMs = 45e3;
+  var DirectFailure = class extends Error {
+    constructor(reason) {
+      super(`DIRECT_PROFILE_${reason.toUpperCase()}`);
+      this.reason = reason;
+    }
+    reason;
+  };
+  function fail(reason) {
+    throw new DirectFailure(reason);
+  }
+  function numericId(value) {
+    if (typeof value === "number" && !Number.isSafeInteger(value)) return null;
+    const text2 = typeof value === "string" || typeof value === "number" ? String(value) : "";
+    return /^\d+$/.test(text2) ? text2 : null;
+  }
+  function cancelDirectProfiles() {
+    for (const controller of active) controller.abort(new DirectFailure("cancelled"));
+  }
+  async function directProfile(args, context3) {
+    const { username, maxPages } = args, pageSize = args.pageSize ?? 10;
+    if (!/^[\w.]{1,64}$/.test(username) || !Number.isInteger(maxPages) || maxPages < 1 || maxPages > 5 || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 20) throw new Error("DIRECT_PROFILE_INVALID_INPUT");
+    const route = location.href, viewer2 = context3.viewer(), started = Date.now();
+    const url = new URL(route);
+    if (url.protocol !== "https:" || url.port || url.username || url.password || !["www.threads.com", "threads.com"].includes(url.hostname) || url.pathname !== `/@${username}` && url.pathname !== `/@${username}/` || !viewer2) fail("binding_unavailable");
+    const queryUrl = new URL("/graphql/query", url.origin).href;
+    const controller = new AbortController();
+    active.add(controller);
+    const check2 = () => {
+      if (controller.signal.aborted) throw controller.signal.reason instanceof DirectFailure ? controller.signal.reason : new DirectFailure("cancelled");
+      if (Date.now() - started >= totalBudgetMs) fail("time_limit");
+      if (location.href !== route || context3.viewer() !== viewer2) fail("context_changed");
+      try {
+        context3.guard();
+      } catch {
+        fail("context_changed");
+      }
+    };
+    const onManual = (event) => {
+      if (event.isTrusted) controller.abort(new DirectFailure("context_changed"));
+    };
+    const onNavigation = () => controller.abort(new DirectFailure("context_changed"));
+    for (const type of ["pointerdown", "keydown", "touchstart"]) document.addEventListener(type, onManual, true);
+    for (const type of ["pagehide", "beforeunload"]) globalThis.addEventListener(type, onNavigation);
+    const watch = setInterval(() => {
+      try {
+        check2();
+      } catch (error) {
+        controller.abort(error);
+      }
+    }, 100);
+    const deadline = setTimeout(() => controller.abort(new DirectFailure("time_limit")), totalBudgetMs);
+    const observedAt = (/* @__PURE__ */ new Date()).toISOString();
+    const result = {
+      profile: null,
+      items: [],
+      contextualPosts: [],
+      sourceUrl: route,
+      observedAt,
+      completeness: "partial",
+      warnings: [],
+      pagination: { provider: "direct", pagesFetched: 0, requests: 0, uniquePosts: 0, hasNext: null, stopReason: "page_limit", pages: [] }
+    };
+    const readText = async (requestUrl, options, cap, timeout) => {
+      check2();
+      const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(Math.min(timeout, totalBudgetMs - (Date.now() - started)))]);
+      let response;
+      try {
+        response = await fetch(requestUrl, { ...options, redirect: "error", signal });
+      } catch {
+        check2();
+        fail("request_failed");
+      }
+      check2();
+      if (!response.ok) {
+        await response.body?.cancel();
+        fail("http_rejected");
+      }
+      if (!response.body) fail("schema_unavailable");
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let size = 0, text2 = "";
+      try {
+        while (true) {
+          const part = await reader.read();
+          check2();
+          if (part.done) break;
+          size += part.value.length;
+          if (size > cap) fail("response_limit");
+          text2 += decoder.decode(part.value, { stream: true });
+        }
+        return text2 + decoder.decode();
+      } catch (error) {
+        await reader.cancel().catch(() => {
+        });
+        check2();
+        if (error instanceof DirectFailure) throw error;
+        fail("request_failed");
+      } finally {
+        reader.releaseLock();
+      }
+    };
+    try {
+      check2();
+      const profiles = [], variables = [], connections = [];
+      let lsd, dtsg, csrf, bloks;
+      let nodes = 0, bootstrapBytes = 0;
+      const walk = (value, depth = 0) => {
+        if (!value || typeof value !== "object") return;
+        if (++nodes > 15e4 || depth > 40) fail("response_limit");
+        if (value.username === username && numericId(value.pk ?? value.id)) profiles.push(value);
+        if (value.variables?.userID && typeof value.variables.first === "number") variables.push(value.variables);
+        if (value.mediaData?.page_info && Array.isArray(value.mediaData.edges)) connections.push(value.mediaData);
+        if (Array.isArray(value)) {
+          if (value[0] === "LSD" && typeof value[2]?.token === "string") lsd = value[2].token;
+          if (value[0] === "DTSGInitialData" && typeof value[2]?.token === "string") dtsg = value[2].token;
+          if (value[0] === "InstagramSecurityConfig" && typeof value[2]?.csrf_token === "string") csrf = value[2].csrf_token;
+          if (value[0] === "WebBloksVersioningID" && typeof value[2]?.versioningID === "string") bloks = value[2].versioningID;
+        }
+        for (const child of Object.values(value)) walk(child, depth + 1);
+      };
+      for (const script of document.querySelectorAll('script[type="application/json"]')) {
+        const text2 = script.textContent ?? "";
+        bootstrapBytes += text2.length;
+        if (bootstrapBytes > 12e6) fail("response_limit");
+        for (const payload of parseWire(text2)) walk(payload);
+      }
+      const ids = new Set(profiles.map((profile) => numericId(profile.pk ?? profile.id)));
+      const privacy = profiles.map((profile) => profile.text_post_app_is_private).filter((value) => typeof value === "boolean");
+      if (ids.size !== 1 || !privacy.length || privacy.some(Boolean)) fail("binding_unavailable");
+      const targetId = [...ids][0];
+      const boundVariables = variables.filter((value) => numericId(value.userID) === targetId);
+      const boundConnections = connections.filter((value) => value.edges.length > 0 && value.edges.every((edge) => edge.node?.thread_items?.[0]?.post?.user?.username === username));
+      if (boundVariables.length !== 1 || boundConnections.length !== 1) fail("binding_unavailable");
+      result.profile = normalizeProfile(profiles.find((profile) => profile.text_post_app_is_private === false));
+      const knownIds = /* @__PURE__ */ new Set(), knownCodes = /* @__PURE__ */ new Set(), cursors = /* @__PURE__ */ new Set();
+      let cursor = null;
+      const acceptPage = (connection, initial) => {
+        if (!Array.isArray(connection.edges) || connection.edges.length > (initial ? 100 : pageSize) || !connection.page_info || typeof connection.page_info.has_next_page !== "boolean") fail("schema_unavailable");
+        const rawPosts = connection.edges.map((edge) => edge.node?.thread_items?.[0]?.post);
+        for (const post of rawPosts) {
+          if (!post || !numericId(post.pk ?? post.id) || post.user?.username !== username || numericId(post.user.pk ?? post.user.id) !== targetId || typeof post.code !== "string" || !/^[\w-]+$/.test(post.code)) fail("binding_unavailable");
+        }
+        const allowedIds = new Set(rawPosts.map((post) => numericId(post.pk ?? post.id)));
+        const parsed = parsePayloads(rawPosts, { source: "profile-direct", observedAt });
+        const normalized = parsed.posts.filter((post) => allowedIds.has(post.id) && post.author.username === username);
+        if (new Set(normalized.map((post) => post.id)).size !== allowedIds.size || parsed.warnings.length) fail("schema_unavailable");
+        let added = 0;
+        for (const post of normalized) {
+          if (knownIds.has(post.id) || knownCodes.has(post.code)) continue;
+          knownIds.add(post.id);
+          knownCodes.add(post.code);
+          result.items.push(post);
+          added++;
+        }
+        const next = typeof connection.page_info.end_cursor === "string" && connection.page_info.end_cursor.length > 0 ? connection.page_info.end_cursor : null;
+        const advanced = initial ? null : next !== null && next !== cursor;
+        result.pagination.pagesFetched++;
+        result.pagination.pages.push({ page: result.pagination.pagesFetched, received: rawPosts.length, added, cursorAdvanced: advanced });
+        result.pagination.uniquePosts = result.items.length;
+        result.pagination.hasNext = connection.page_info.has_next_page;
+        if (!result.pagination.hasNext) result.pagination.stopReason = "end_of_connection";
+        else if (!next) result.pagination.stopReason = "cursor_missing";
+        else if (cursors.has(next)) result.pagination.stopReason = "cursor_loop";
+        else if (!initial && !added) result.pagination.stopReason = "no_progress";
+        else result.pagination.stopReason = "page_limit";
+        if (next) cursors.add(next);
+        cursor = next;
+      };
+      acceptPage(boundConnections[0], true);
+      if (maxPages === 1 || result.pagination.stopReason !== "page_limit") return result;
+      if (!lsd || !dtsg || !csrf) fail("binding_unavailable");
+      let docId, artifact, staticBytes = 0;
+      const scripts = [...document.querySelectorAll("script[src]")].map((script) => script.src).filter((src) => {
+        try {
+          const u = new URL(src);
+          return u.protocol === "https:" && !u.username && !u.password && /(?:^|\.)(?:cdninstagram\.com|fbcdn\.net)$/.test(u.hostname);
+        } catch {
+          return false;
+        }
+      });
+      for (const src of [...new Set(scripts)].slice(0, 50)) {
+        check2();
+        let text2;
+        try {
+          text2 = await readText(src, { credentials: "omit" }, 5e6, 2e3);
+        } catch (error) {
+          if (error instanceof DirectFailure && ["http_rejected", "request_failed"].includes(error.reason)) continue;
+          throw error;
+        }
+        staticBytes += text2.length;
+        if (staticBytes > 15e6) fail("response_limit");
+        const match = /__d\("BarcelonaProfileThreadsTabRefetchableDirectQuery_threadsRelayOperation",\[\],[\s\S]{0,130}?\.exports="(\d{10,30})"/.exec(text2);
+        if (match) docId = match[1];
+        const start = text2.indexOf(`__d("${queryName}.threads.graphql"`);
+        if (start >= 0) {
+          const end = text2.indexOf("__d(", start + 4);
+          artifact = text2.slice(start, end < 0 ? void 0 : end);
+        }
+        if (docId && artifact) break;
+      }
+      if (!docId || !artifact?.includes('operationKind:"query"') || !artifact.includes(`name:"${queryName}"`)) fail("query_unavailable");
+      const flags = [...new Set(artifact.match(/__relay_internal__pv__[A-Za-z0-9_]+/g) ?? [])];
+      const currentVariables = boundVariables[0];
+      if (flags.some((key) => typeof currentVariables[key] !== "boolean")) fail("binding_unavailable");
+      while (result.pagination.pagesFetched < maxPages && result.pagination.stopReason === "page_limit") {
+        check2();
+        const nextVariables = {
+          ...Object.fromEntries(flags.map((key) => [key, currentVariables[key]])),
+          userID: targetId,
+          first: pageSize,
+          after: cursor,
+          before: null,
+          last: null,
+          allow_page_info_for_lox_user: currentVariables.allow_page_info_for_lox_user
+        };
+        const body = new URLSearchParams({
+          __a: "1",
+          fb_dtsg: dtsg,
+          lsd,
+          fb_api_caller_class: "RelayModern",
+          fb_api_req_friendly_name: queryName,
+          doc_id: docId,
+          variables: JSON.stringify(nextVariables),
+          server_timestamps: "true"
+        });
+        result.pagination.requests++;
+        const text2 = await readText(queryUrl, { method: "POST", credentials: "same-origin", headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "X-FB-LSD": lsd,
+          "X-CSRFToken": csrf,
+          "X-IG-App-ID": "238260118697367",
+          ...bloks ? { "X-BLOKS-VERSION-ID": bloks } : {}
+        }, body }, 3e6, 12e3);
+        const payloads = parseWire(text2);
+        if (payloads.some((payload) => Array.isArray(payload.errors) && payload.errors.length)) fail("graphql_error");
+        const pages = payloads.filter((payload) => payload.data?.mediaData).map((payload) => payload.data.mediaData);
+        if (pages.length !== 1) fail("schema_unavailable");
+        check2();
+        acceptPage(pages[0], false);
+      }
+      return result;
+    } catch (error) {
+      const reason = error instanceof DirectFailure ? error.reason : "request_failed";
+      if (!result.pagination.pagesFetched || reason === "context_changed" || reason === "cancelled") throw new DirectFailure(reason);
+      result.pagination.stopReason = reason;
+      result.warnings.push(`Direct profile pagination stopped: ${reason}. Results cover only accepted pages.`);
+      return result;
+    } finally {
+      clearInterval(watch);
+      clearTimeout(deadline);
+      active.delete(controller);
+      controller.abort();
+      for (const type of ["pointerdown", "keydown", "touchstart"]) document.removeEventListener(type, onManual, true);
+      for (const type of ["pagehide", "beforeunload"]) globalThis.removeEventListener(type, onNavigation);
+    }
+  }
+
   // src/media-runtime.ts
   var transfer;
   var generation = 0;
   var approved;
   var maxTotal = 64 * 1024 * 1024;
-  function fail(code, message) {
+  function fail2(code, message) {
     throw new Error(`${code}: ${message}`);
   }
   function visible(el) {
@@ -214,12 +477,12 @@ var ThreadsMCP = (() => {
   }
   function account() {
     const accounts = [...document.querySelectorAll('a[href^="/@"]')].filter(visible).filter((el) => /^(Profile|個人檔案)$/i.test(el.getAttribute("aria-label") || el.querySelector("svg")?.getAttribute("aria-label") || "")).map((el) => el.getAttribute("href")?.match(/^\/@([\w.]+)\/?$/)?.[1]?.toLowerCase()).filter(Boolean);
-    if (new Set(accounts).size !== 1) fail("ACCOUNT_UNVERIFIED", "A unique visible account profile control is required.");
+    if (new Set(accounts).size !== 1) fail2("ACCOUNT_UNVERIFIED", "A unique visible account profile control is required.");
     return accounts[0];
   }
   function guard() {
     if (location.protocol !== "https:" || !["www.threads.com", "threads.com", "www.threads.net", "threads.net"].includes(location.hostname))
-      fail("WRONG_PAGE", "Only a selected HTTPS Threads page is supported.");
+      fail2("WRONG_PAGE", "Only a selected HTTPS Threads page is supported.");
   }
   function attachmentScope(dialog, editor) {
     const body = editor.closest('[data-barcelona-composer-body="true"]');
@@ -239,33 +502,33 @@ var ThreadsMCP = (() => {
   }
   function composer() {
     const dialogs = [...document.querySelectorAll('[role="dialog"]')].filter(visible);
-    if (dialogs.length !== 1) fail("MEDIA_COMPOSER_REQUIRED", "Open exactly one empty composer dialog before staging files.");
+    if (dialogs.length !== 1) fail2("MEDIA_COMPOSER_REQUIRED", "Open exactly one empty composer dialog before staging files.");
     const dialog = dialogs[0];
     const editors2 = [...dialog.querySelectorAll('[contenteditable="true"],textarea')].filter(visible);
     const inputs = [...dialog.querySelectorAll('input[type="file"]')];
-    if (editors2.length !== 1 || inputs.length !== 1) fail("MEDIA_COMPOSER_AMBIGUOUS", "A unique composer and file input are required.");
+    if (editors2.length !== 1 || inputs.length !== 1) fail2("MEDIA_COMPOSER_AMBIGUOUS", "A unique composer and file input are required.");
     const editor = editors2[0];
     const input = inputs[0];
     const text2 = editor instanceof HTMLTextAreaElement ? editor.value : editor.textContent || "";
     const attachments = attachmentScope(dialog, editor);
     const previews = [...attachments.querySelectorAll("img,video")].some((el) => el.tagName === "VIDEO" || !/(profile picture|profile photo|大頭貼|頭像)/i.test(el.getAttribute("alt") || ""));
     const removeControls = [...attachments.querySelectorAll("[aria-label]")].some((el) => /^(Remove|Delete|移除|刪除)(?:$|\s*(media|image|photo|video|attachment|圖片|相片|影片|附件))/i.test(el.getAttribute("aria-label") || ""));
-    if (text2.trim() || input.files?.length || previews || removeControls) fail("MEDIA_DRAFT_EXISTS", "Existing draft text or attachments must be preserved; use an empty composer.");
-    if (input.disabled || input.getAttribute("aria-disabled") === "true" || editor.getAttribute("aria-disabled") === "true") fail("MEDIA_INPUT_DISABLED", "The composer is disabled.");
+    if (text2.trim() || input.files?.length || previews || removeControls) fail2("MEDIA_DRAFT_EXISTS", "Existing draft text or attachments must be preserved; use an empty composer.");
+    if (input.disabled || input.getAttribute("aria-disabled") === "true" || editor.getAttribute("aria-disabled") === "true") fail2("MEDIA_INPUT_DISABLED", "The composer is disabled.");
     return { dialog, editor, input };
   }
   function check(current2) {
     guard();
-    if (current2.generation !== generation) fail("MEDIA_CANCELLED", "The transfer was cancelled; no files were dispatched.");
+    if (current2.generation !== generation) fail2("MEDIA_CANCELLED", "The transfer was cancelled; no files were dispatched.");
     if (Date.now() > current2.expires) {
       clear();
-      fail("MEDIA_EXPIRED", "The transfer expired.");
+      fail2("MEDIA_EXPIRED", "The transfer expired.");
     }
     if (location.href !== current2.url || account() !== current2.account || !current2.dialog.isConnected || !current2.input.isConnected || !current2.editor.isConnected || !visible(current2.dialog) || !visible(current2.editor) || fingerprint(current2.dialog, current2.editor, current2.input) !== current2.fingerprint)
-      fail("MEDIA_COMPOSER_CHANGED", "The account, page, composer or file input changed; no files were dispatched.");
+      fail2("MEDIA_COMPOSER_CHANGED", "The account, page, composer or file input changed; no files were dispatched.");
     const fresh = composer();
     if (fresh.dialog !== current2.dialog || fresh.editor !== current2.editor || fresh.input !== current2.input)
-      fail("MEDIA_COMPOSER_CHANGED", "The composer changed; no files were dispatched.");
+      fail2("MEDIA_COMPOSER_CHANGED", "The composer changed; no files were dispatched.");
   }
   function clear() {
     if (transfer) clearTimeout(transfer.timer);
@@ -285,35 +548,35 @@ var ThreadsMCP = (() => {
     guard();
     const state = approved;
     if (!state || state.token !== mediaToken || Date.now() > state.expires || location.href !== state.url || account() !== state.account || scope !== state.dialog || !scope.isConnected || !visible(scope) || !state.input.isConnected || !scope.contains(state.input))
-      fail("MEDIA_APPROVAL_STALE", "The staged media approval is missing, expired or belongs to another composer.");
+      fail2("MEDIA_APPROVAL_STALE", "The staged media approval is missing, expired or belongs to another composer.");
     const files = [...state.input.files || []];
     if (files.length !== state.files.length || files.some((file, index) => file !== state.files[index]))
-      fail("MEDIA_APPROVAL_STALE", "The composer attachments changed.");
+      fail2("MEDIA_APPROVAL_STALE", "The composer attachments changed.");
     const attachments = attachmentScope(scope, state.editor);
-    if (attachments !== state.attachmentScope) fail("MEDIA_APPROVAL_STALE", "The editable attachment region changed.");
+    if (attachments !== state.attachmentScope) fail2("MEDIA_APPROVAL_STALE", "The editable attachment region changed.");
     const previews = [...attachments.querySelectorAll('img[src^="blob:"],video')].filter(visible).map((node) => ({ node, source: node.getAttribute("src") }));
-    if (previews.length !== state.files.length) fail("MEDIA_PREVIEW_UNVERIFIED", "Every staged file needs one visible attachment preview; missing or additional previews cannot be approved.");
+    if (previews.length !== state.files.length) fail2("MEDIA_PREVIEW_UNVERIFIED", "Every staged file needs one visible attachment preview; missing or additional previews cannot be approved.");
     if (state.previews && (previews.length !== state.previews.length || previews.some((preview, index) => preview.node !== state.previews[index].node || preview.source !== state.previews[index].source)))
-      fail("MEDIA_APPROVAL_STALE", "The attachment preview changed after preparation.");
+      fail2("MEDIA_APPROVAL_STALE", "The attachment preview changed after preparation.");
     state.previews ??= previews;
   }
   async function media(command) {
     guard();
     if (transfer && Date.now() > transfer.expires) clear();
     if (command.operation === "begin") {
-      if (transfer) fail("MEDIA_BUSY", "Another transfer is already pending.");
-      if (typeof command.expectedAccount !== "string" || !/^[\w.]{1,30}$/.test(command.expectedAccount)) fail("INVALID_MEDIA", "An expected account is required.");
+      if (transfer) fail2("MEDIA_BUSY", "Another transfer is already pending.");
+      if (typeof command.expectedAccount !== "string" || !/^[\w.]{1,30}$/.test(command.expectedAccount)) fail2("INVALID_MEDIA", "An expected account is required.");
       const verifiedAccount = account();
-      if (command.expectedAccount.toLowerCase() !== verifiedAccount) fail("ACCOUNT_MISMATCH", "The selected account does not match.");
+      if (command.expectedAccount.toLowerCase() !== verifiedAccount) fail2("ACCOUNT_MISMATCH", "The selected account does not match.");
       const { dialog, editor, input } = composer();
-      if (!Array.isArray(command.files) || command.files.length < 1 || command.files.length > 20) fail("INVALID_MEDIA", "Provide between 1 and 20 files.");
-      if (command.files.length > 1 && !input.multiple) fail("MEDIA_MULTIPLE_UNSUPPORTED", "The selected file input does not accept multiple files.");
+      if (!Array.isArray(command.files) || command.files.length < 1 || command.files.length > 20) fail2("INVALID_MEDIA", "Provide between 1 and 20 files.");
+      if (command.files.length > 1 && !input.multiple) fail2("MEDIA_MULTIPLE_UNSUPPORTED", "The selected file input does not accept multiple files.");
       let total = 0;
       const manifests = command.files.map((file) => {
-        if (!file || typeof file.name !== "string" || !file.name || file.name.length > 180 || /[\\/\x00-\x1f\x7f]/.test(file.name) || !["image/jpeg", "image/png", "image/gif", "image/webp", "video/mp4", "video/quicktime", "video/webm"].includes(file.mime) || !Number.isSafeInteger(file.size) || file.size < 1 || file.size > (file.mime.startsWith("image/") ? 8 * 1024 * 1024 : maxTotal) || typeof file.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(file.sha256)) fail("INVALID_MEDIA", "Invalid file manifest.");
+        if (!file || typeof file.name !== "string" || !file.name || file.name.length > 180 || /[\\/\x00-\x1f\x7f]/.test(file.name) || !["image/jpeg", "image/png", "image/gif", "image/webp", "video/mp4", "video/quicktime", "video/webm"].includes(file.mime) || !Number.isSafeInteger(file.size) || file.size < 1 || file.size > (file.mime.startsWith("image/") ? 8 * 1024 * 1024 : maxTotal) || typeof file.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(file.sha256)) fail2("INVALID_MEDIA", "Invalid file manifest.");
         total += file.size;
-        if (total > maxTotal) fail("MEDIA_SIZE_LIMIT", "The total byte limit is 64 MiB.");
-        if (!accepts(input, file)) fail("MEDIA_INPUT_TYPE_UNSUPPORTED", "The file input does not accept this media type.");
+        if (total > maxTotal) fail2("MEDIA_SIZE_LIMIT", "The total byte limit is 64 MiB.");
+        if (!accepts(input, file)) fail2("MEDIA_INPUT_TYPE_UNSUPPORTED", "The file input does not accept this media type.");
         return { name: file.name, mime: file.mime, size: file.size, sha256: file.sha256 };
       });
       const id2 = crypto.randomUUID();
@@ -332,7 +595,7 @@ var ThreadsMCP = (() => {
       };
       return { uploadId: id2, expiresInMs: 3e5, maxChunkBytes: 32 * 1024 };
     }
-    if (!transfer || transfer.id !== command.uploadId) fail("MEDIA_TRANSFER_MISSING", "No matching pending transfer.");
+    if (!transfer || transfer.id !== command.uploadId) fail2("MEDIA_TRANSFER_MISSING", "No matching pending transfer.");
     if (command.operation === "abort") {
       clear();
       return { aborted: true, composerChanged: false };
@@ -340,21 +603,21 @@ var ThreadsMCP = (() => {
     const current2 = transfer;
     check(current2);
     if (command.operation === "chunk") {
-      if (!Number.isInteger(command.fileIndex) || !Number.isInteger(command.offset) || typeof command.data !== "string" || command.data.length < 4 || command.data.length > 43692 || !/^[A-Za-z0-9+/]+={0,2}$/.test(command.data)) fail("INVALID_MEDIA_CHUNK", "Invalid bounded base64 chunk.");
+      if (!Number.isInteger(command.fileIndex) || !Number.isInteger(command.offset) || typeof command.data !== "string" || command.data.length < 4 || command.data.length > 43692 || !/^[A-Za-z0-9+/]+={0,2}$/.test(command.data)) fail2("INVALID_MEDIA_CHUNK", "Invalid bounded base64 chunk.");
       const file = current2.files[command.fileIndex];
-      if (!file || command.offset !== file.received) fail("INVALID_MEDIA_CHUNK", "Chunks must arrive once in order.");
+      if (!file || command.offset !== file.received) fail2("INVALID_MEDIA_CHUNK", "Chunks must arrive once in order.");
       const decoded = atob(command.data);
-      if (btoa(decoded) !== command.data || decoded.length > 32768 || decoded.length > file.bytes.length - file.received) fail("INVALID_MEDIA_CHUNK", "Chunk exceeds the remaining file size.");
+      if (btoa(decoded) !== command.data || decoded.length > 32768 || decoded.length > file.bytes.length - file.received) fail2("INVALID_MEDIA_CHUNK", "Chunk exceeds the remaining file size.");
       file.bytes.set(Uint8Array.from(decoded, (value) => value.charCodeAt(0)), file.received);
       file.received += decoded.length;
       return { received: file.received, fileIndex: command.fileIndex };
     }
-    if (command.operation !== "finish") fail("INVALID_MEDIA_COMMAND", "Unknown media operation.");
+    if (command.operation !== "finish") fail2("INVALID_MEDIA_COMMAND", "Unknown media operation.");
     clear();
     for (const file of current2.files) {
-      if (file.received !== file.manifest.size) fail("MEDIA_INCOMPLETE", "All file bytes must be transferred before staging.");
+      if (file.received !== file.manifest.size) fail2("MEDIA_INCOMPLETE", "All file bytes must be transferred before staging.");
       const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", file.bytes));
-      if ([...digest].map((value) => value.toString(16).padStart(2, "0")).join("") !== file.manifest.sha256) fail("MEDIA_HASH_MISMATCH", "The transferred file does not match its manifest.");
+      if ([...digest].map((value) => value.toString(16).padStart(2, "0")).join("") !== file.manifest.sha256) fail2("MEDIA_HASH_MISMATCH", "The transferred file does not match its manifest.");
     }
     check(current2);
     const data = new DataTransfer();
@@ -415,9 +678,9 @@ var ThreadsMCP = (() => {
     };
   }
   function assertGeneration(expected) {
-    if (generation2 !== expected) fail2("ACTION_CANCELLED", "Browser preparation was cancelled or superseded; no further input was dispatched.");
+    if (generation2 !== expected) fail3("ACTION_CANCELLED", "Browser preparation was cancelled or superseded; no further input was dispatched.");
   }
-  function fail2(code, message) {
+  function fail3(code, message) {
     throw new Error(`${code}: ${message}`);
   }
   var isVisible = (el) => el instanceof HTMLElement && el.isConnected && el.getClientRects().length > 0 && getComputedStyle(el).display !== "none" && getComputedStyle(el).visibility !== "hidden" && !el.closest('[aria-hidden="true"], [inert]');
@@ -444,7 +707,7 @@ var ThreadsMCP = (() => {
   var fingerprint2 = (el) => JSON.stringify([el.tagName, el.getAttribute("role"), name(el), el.getAttribute("aria-pressed"), el.getAttribute("aria-expanded"), el.getAttribute("aria-disabled"), el.innerText]);
   var overlays = () => [...document.querySelectorAll('[role="dialog"],[role="menu"]')].filter(isVisible);
   function only(values, message, code = "AMBIGUOUS_UI") {
-    if (values.length !== 1) fail2(code, message);
+    if (values.length !== 1) fail3(code, message);
     return values[0];
   }
   function account2() {
@@ -456,10 +719,10 @@ var ThreadsMCP = (() => {
     try {
       url = new URL(value);
     } catch {
-      return fail2("INVALID_INPUT", "A full Threads HTTPS URL is required.");
+      return fail3("INVALID_INPUT", "A full Threads HTTPS URL is required.");
     }
     if (url.protocol !== "https:" || !["threads.com", "www.threads.com", "threads.net", "www.threads.net"].includes(url.hostname) || url.username || url.password || url.port)
-      fail2("INVALID_INPUT", "Only canonical Threads HTTPS URLs are allowed.");
+      fail3("INVALID_INPUT", "Only canonical Threads HTTPS URLs are allowed.");
     url.hostname = "www.threads.com";
     url.hash = "";
     url.search = "";
@@ -467,21 +730,21 @@ var ThreadsMCP = (() => {
     return url.href;
   }
   function requestChecked(request, inspectOnly = false) {
-    if (!socialKinds.includes(request.kind)) fail2("INVALID_INPUT", "Unknown social action.");
+    if (!socialKinds.includes(request.kind)) fail3("INVALID_INPUT", "Unknown social action.");
     const targetUrl = canonical(request.targetUrl);
     const path = new URL(targetUrl).pathname;
     if (["follow", "unfollow"].includes(request.kind) ? !/^\/@[\w.]+$/.test(path) : request.kind === "publish" ? path !== "/" : !/^\/@[\w.]+\/post\/[\w-]+$/.test(path))
-      fail2("INVALID_INPUT", "Use the exact profile/post permalink; publishing requires the Threads home URL.");
+      fail3("INVALID_INPUT", "Use the exact profile/post permalink; publishing requires the Threads home URL.");
     if (["publish", "reply", "quote"].includes(request.kind)) {
       if (!(inspectOnly && request.text === void 0) && (typeof request.text !== "string" || !request.text.trim() || Array.from(request.text).length > 500))
-        fail2("INVALID_INPUT", "Browser publication requires non-empty text of at most 500 characters.");
-    } else if (request.text !== void 0 || request.mediaToken !== void 0) fail2("INVALID_INPUT", "Text and approved media are only accepted for publish, reply and quote.");
-    if (request.mediaToken !== void 0 && (typeof request.mediaToken !== "string" || !/^[\w-]{1,100}$/.test(request.mediaToken))) fail2("INVALID_INPUT", "An approved media token is required.");
+        fail3("INVALID_INPUT", "Browser publication requires non-empty text of at most 500 characters.");
+    } else if (request.text !== void 0 || request.mediaToken !== void 0) fail3("INVALID_INPUT", "Text and approved media are only accepted for publish, reply and quote.");
+    if (request.mediaToken !== void 0 && (typeof request.mediaToken !== "string" || !/^[\w-]{1,100}$/.test(request.mediaToken))) fail3("INVALID_INPUT", "An approved media token is required.");
     return { kind: request.kind, targetUrl, ...request.text !== void 0 ? { text: request.text } : {}, ...request.mediaToken ? { mediaToken: request.mediaToken } : {} };
   }
   function context(request) {
     const url = canonical(location.href);
-    if (url !== request.targetUrl) fail2("TARGET_CHANGED_ROUTE", "Navigate to the exact target URL before staging this action.");
+    if (url !== request.targetUrl) fail3("TARGET_CHANGED_ROUTE", "Navigate to the exact target URL before staging this action.");
     return { url, account: account2() };
   }
   function links(scope = document) {
@@ -588,7 +851,7 @@ var ThreadsMCP = (() => {
         return false;
       }
     });
-    if (author !== expectedAccount || !authorLinks.length) fail2("OWN_POST_REQUIRED", "Deletion requires the exact current-account post permalink and a visible matching author profile link in that post card.");
+    if (author !== expectedAccount || !authorLinks.length) fail3("OWN_POST_REQUIRED", "Deletion requires the exact current-account post permalink and a visible matching author profile link in that post card.");
   }
   function currentState(request, scope) {
     const buttons = actionControls(request, scope);
@@ -617,7 +880,7 @@ var ThreadsMCP = (() => {
       if (value !== void 0) return value;
       await new Promise((resolve) => setTimeout(resolve, 150));
     }
-    return fail2(code, "The expected unique UI did not appear; inspect it before another preparation.");
+    return fail3(code, "The expected unique UI did not appear; inspect it before another preparation.");
   }
   async function settledMenuTarget(request, pattern, expectedGeneration, expectedAccount) {
     let previousCard;
@@ -629,8 +892,8 @@ var ThreadsMCP = (() => {
     try {
       while (Date.now() < deadline) {
         assertGeneration(expectedGeneration);
-        if (context(request).account !== expectedAccount) fail2("ACCOUNT_MISMATCH", "The account changed while waiting for the target post to settle.");
-        if (overlays().length) fail2("EXISTING_OVERLAY", "A menu or dialog appeared before the target post settled.");
+        if (context(request).account !== expectedAccount) fail3("ACCOUNT_MISMATCH", "The account changed while waiting for the target post to settle.");
+        if (overlays().length) fail3("EXISTING_OVERLAY", "A menu or dialog appeared before the target post settled.");
         try {
           const card = postCard(request.targetUrl);
           if (request.kind === "delete") assertOwnPost(request, card, expectedAccount);
@@ -660,7 +923,7 @@ var ThreadsMCP = (() => {
         }
         await new Promise((resolve) => setTimeout(resolve, 150));
       }
-      return fail2("UI_NOT_READY_MENU_TARGET", "The exact post and its unique menu trigger did not settle before the preparation deadline. No menu click was dispatched.");
+      return fail3("UI_NOT_READY_MENU_TARGET", "The exact post and its unique menu trigger did not settle before the preparation deadline. No menu click was dispatched.");
     } finally {
       observer?.disconnect();
     }
@@ -668,21 +931,21 @@ var ThreadsMCP = (() => {
   async function menuFor(request, expectedGeneration) {
     assertGeneration(expectedGeneration);
     const expectedAccount = context(request).account;
-    if (overlays().length) fail2("EXISTING_OVERLAY", "Close the existing menu/dialog before staging another social action.");
+    if (overlays().length) fail3("EXISTING_OVERLAY", "Close the existing menu/dialog before staging another social action.");
     const pattern = ["repost", "unrepost", "quote"].includes(request.kind) ? /^(Repost|轉發)(?:\s*\d[\d.,]*(?:\s*[萬万億KMB])?)?$/i : /^(More|More options|更多|更多選項)$/i;
     const { card, opener } = await settledMenuTarget(request, pattern, expectedGeneration, expectedAccount);
     assertGeneration(expectedGeneration);
-    if (context(request).account !== expectedAccount) fail2("ACCOUNT_MISMATCH", "The account changed before opening its action menu.");
-    if (overlays().length) fail2("EXISTING_OVERLAY", "A menu or dialog appeared before the prepared menu click.");
-    if (!card.isConnected || postCard(request.targetUrl) !== card) fail2("TARGET_CHANGED_MENU_CARD", "The settled exact post changed before its menu was opened.");
+    if (context(request).account !== expectedAccount) fail3("ACCOUNT_MISMATCH", "The account changed before opening its action menu.");
+    if (overlays().length) fail3("EXISTING_OVERLAY", "A menu or dialog appeared before the prepared menu click.");
+    if (!card.isConnected || postCard(request.targetUrl) !== card) fail3("TARGET_CHANGED_MENU_CARD", "The settled exact post changed before its menu was opened.");
     if (request.kind === "delete") assertOwnPost(request, card, expectedAccount);
-    if (!isVisible(opener) || !card.contains(opener) || !pattern.test(name(opener))) fail2("TARGET_CHANGED_MENU_TRIGGER", "The settled menu trigger changed before it was opened.");
+    if (!isVisible(opener) || !card.contains(opener) || !pattern.test(name(opener))) fail3("TARGET_CHANGED_MENU_TRIGGER", "The settled menu trigger changed before it was opened.");
     opener.click();
     const menu = await waitFor(() => {
       assertGeneration(expectedGeneration);
-      if (context(request).account !== expectedAccount) fail2("ACCOUNT_MISMATCH", "The account changed while opening its action menu.");
-      if (!card.isConnected) fail2("TARGET_CHANGED_MENU_CARD", "The original post card was removed while opening its action menu.");
-      if (!opener.isConnected || !card.contains(opener)) fail2("TARGET_CHANGED_MENU_TRIGGER", "The original menu trigger was removed from its post card.");
+      if (context(request).account !== expectedAccount) fail3("ACCOUNT_MISMATCH", "The account changed while opening its action menu.");
+      if (!card.isConnected) fail3("TARGET_CHANGED_MENU_CARD", "The original post card was removed while opening its action menu.");
+      if (!opener.isConnected || !card.contains(opener)) fail3("TARGET_CHANGED_MENU_TRIGGER", "The original menu trigger was removed from its post card.");
       const found = overlays();
       if (found.length !== 1) return;
       const candidate = found[0];
@@ -693,7 +956,7 @@ var ThreadsMCP = (() => {
     }, "AMBIGUOUS_UI_MENU_CONTENT");
     assertGeneration(expectedGeneration);
     context(request);
-    if (!card.isConnected) fail2("TARGET_CHANGED_MENU_CARD", "The target card changed while opening its menu.");
+    if (!card.isConnected) fail3("TARGET_CHANGED_MENU_CARD", "The target card changed while opening its menu.");
     return { menu, card };
   }
   function editorValue(editor) {
@@ -767,7 +1030,7 @@ var ThreadsMCP = (() => {
           scope = only(overlays().filter((el) => el.getAttribute("role") === "dialog"), "Approved media must be in exactly one composer dialog.");
           assertApprovedMedia(request.mediaToken, scope);
         } else {
-          if (overlays().length || editors(document).some((el) => editorValue(el).trim())) fail2("EXISTING_DRAFT", "An existing draft or dialog is present; leave it intact and resolve it manually.");
+          if (overlays().length || editors(document).some((el) => editorValue(el).trim())) fail3("EXISTING_DRAFT", "An existing draft or dialog is present; leave it intact and resolve it manually.");
           if (request.kind === "publish") {
             only(controls(document).filter((el) => /^(Create|New thread|新增|建立|新串文)$/i.test(name(el))), "A unique new-thread control is required.").click();
           } else {
@@ -792,13 +1055,13 @@ var ThreadsMCP = (() => {
         assertGeneration(expectedGeneration);
         context(request);
         editor = only(editors(scope), "The composer needs exactly one text editor.");
-        if (editorValue(editor).trim()) fail2("EXISTING_DRAFT", "The opened composer contains a draft; it was not replaced.");
+        if (editorValue(editor).trim()) fail3("EXISTING_DRAFT", "The opened composer contains a draft; it was not replaced.");
         if (request.kind !== "publish" && !links(scope).some((link) => link.url === request.targetUrl)) {
           const preview = request.kind === "reply" ? matchingReplyPreview(scope, editor, request.targetUrl, expectedReply) : void 0;
-          if (!preview || !expectedReply) fail2("TARGET_UNVERIFIED", "The composer needs an exact target permalink or a reply preview matching the source author, timestamp and complete visible body.");
+          if (!preview || !expectedReply) fail3("TARGET_UNVERIFIED", "The composer needs an exact target permalink or a reply preview matching the source author, timestamp and complete visible body.");
           replyPreview = { element: preview, evidence: expectedReply };
         }
-        if (!request.mediaToken && hasAttachments(scope, editor)) fail2("EXISTING_MEDIA", "Existing composer media was not authorized.");
+        if (!request.mediaToken && hasAttachments(scope, editor)) fail3("EXISTING_MEDIA", "Existing composer media was not authorized.");
         editor.focus();
         if (editor instanceof HTMLTextAreaElement) Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(editor, request.text);
         else editor.textContent = request.text;
@@ -809,9 +1072,9 @@ var ThreadsMCP = (() => {
           return bs.length === 1 ? bs[0] : void 0;
         });
         assertGeneration(expectedGeneration);
-        if (editorValue(editor) !== request.text) fail2("DRAFT_NOT_ACCEPTED", "The composer did not retain the exact requested text.");
+        if (editorValue(editor) !== request.text) fail3("DRAFT_NOT_ACCEPTED", "The composer did not retain the exact requested text.");
       } else {
-        if (overlays().length) fail2("EXISTING_OVERLAY", "Close the existing menu/dialog before staging a social action.");
+        if (overlays().length) fail3("EXISTING_OVERLAY", "Close the existing menu/dialog before staging a social action.");
         scope = ["follow", "unfollow"].includes(request.kind) ? profileScope(request) : postCard(request.targetUrl);
         targetScope = scope;
         if (request.kind === "delete") assertOwnPost(request, scope, ctx.account);
@@ -823,7 +1086,7 @@ var ThreadsMCP = (() => {
         }
         assertGeneration(expectedGeneration);
         const state = currentState(request, scope);
-        if (state === "unknown") fail2("AMBIGUOUS_UI_ACTION_STATE", "The exact target has conflicting or unknown action state; no action was staged.");
+        if (state === "unknown") fail3("AMBIGUOUS_UI_ACTION_STATE", "The exact target has conflicting or unknown action state; no action was staged.");
         if (state !== inverse[request.kind]) element = only(actionControls(request, scope).filter((el) => matchers[request.kind].test(name(el))), "The exact desired action is not uniquely available. No toggle was dispatched.", "AMBIGUOUS_UI_ACTION_CONTROL");
       }
       assertGeneration(expectedGeneration);
@@ -856,32 +1119,32 @@ var ThreadsMCP = (() => {
   }
   function socialCommit(token, expectedAccount) {
     const entry = staged;
-    if (!entry || entry.token !== token || entry.consumed) fail2("INVALID_ACTION", "The browser preparation is absent or consumed.");
+    if (!entry || entry.token !== token || entry.consumed) fail3("INVALID_ACTION", "The browser preparation is absent or consumed.");
     entry.consumed = true;
-    if (Date.now() > entry.expires) fail2("EXPIRED_ACTION", "Prepare from current UI again.");
+    if (Date.now() > entry.expires) fail3("EXPIRED_ACTION", "Prepare from current UI again.");
     const ctx = context(entry.request);
-    if (ctx.account !== entry.account || expectedAccount.replace(/^@/, "").toLowerCase() !== entry.account) fail2("ACCOUNT_MISMATCH", "The signed-in account changed.");
-    if (!entry.scope?.isConnected || !isVisible(entry.scope)) fail2("TARGET_CHANGED", "The staged UI scope changed.");
-    if (overlays().some((overlay) => overlay !== entry.scope)) fail2("UI_CHANGED", "Another dialog or menu opened after preparation.");
+    if (ctx.account !== entry.account || expectedAccount.replace(/^@/, "").toLowerCase() !== entry.account) fail3("ACCOUNT_MISMATCH", "The signed-in account changed.");
+    if (!entry.scope?.isConnected || !isVisible(entry.scope)) fail3("TARGET_CHANGED", "The staged UI scope changed.");
+    if (overlays().some((overlay) => overlay !== entry.scope)) fail3("UI_CHANGED", "Another dialog or menu opened after preparation.");
     if (entry.targetScope && !entry.editor) {
       const target = ["follow", "unfollow"].includes(entry.request.kind) ? profileScope(entry.request) : postCard(entry.request.targetUrl);
-      if (target !== entry.targetScope) fail2("TARGET_CHANGED", "The exact target card or header changed after staging.");
+      if (target !== entry.targetScope) fail3("TARGET_CHANGED", "The exact target card or header changed after staging.");
       if (entry.request.kind === "delete") assertOwnPost(entry.request, target, entry.account);
     }
     if (entry.noop) {
-      if (!observation(entry.request, entry.scope).verified) fail2("STATE_CHANGED", "The desired state changed since preparation.");
+      if (!observation(entry.request, entry.scope).verified) fail3("STATE_CHANGED", "The desired state changed since preparation.");
       return { dispatched: false, noop: true };
     }
     const el = entry.element;
-    if (!isVisible(el) || !entry.scope.contains(el) || fingerprint2(el) !== entry.fingerprint || el.matches(':disabled,[aria-disabled="true"]')) fail2("STALE_ELEMENT", "The staged control changed; no input was dispatched.");
-    if (entry.editor && (!isVisible(entry.editor) || !entry.scope.contains(entry.editor) || editorValue(entry.editor) !== entry.request.text)) fail2("DRAFT_CHANGED", "The exact staged draft changed.");
+    if (!isVisible(el) || !entry.scope.contains(el) || fingerprint2(el) !== entry.fingerprint || el.matches(':disabled,[aria-disabled="true"]')) fail3("STALE_ELEMENT", "The staged control changed; no input was dispatched.");
+    if (entry.editor && (!isVisible(entry.editor) || !entry.scope.contains(entry.editor) || editorValue(entry.editor) !== entry.request.text)) fail3("DRAFT_CHANGED", "The exact staged draft changed.");
     if (entry.editor) {
       if (entry.request.mediaToken) assertApprovedMedia(entry.request.mediaToken, entry.scope);
-      else if (hasAttachments(entry.scope, entry.editor)) fail2("MEDIA_CHANGED", "Unexpected composer media appeared after preparation.");
+      else if (hasAttachments(entry.scope, entry.editor)) fail3("MEDIA_CHANGED", "Unexpected composer media appeared after preparation.");
     }
     if (entry.editor && entry.request.kind !== "publish" && !links(entry.scope).some((link) => link.url === entry.request.targetUrl)) {
       if (!entry.targetScope?.isConnected || !entry.replyPreview || matchingReplyPreview(entry.scope, entry.editor, entry.request.targetUrl, entry.replyPreview.evidence) !== entry.replyPreview.element)
-        fail2("TARGET_CHANGED", "The composer target preview changed after preparation.");
+        fail3("TARGET_CHANGED", "The composer target preview changed after preparation.");
     }
     entry.committedAt = Date.now();
     el.click();
@@ -891,13 +1154,13 @@ var ThreadsMCP = (() => {
     const expectedGeneration = generation2;
     const inspected = requestChecked(input, true);
     const entry = staged && staged.token === token && staged.consumed && staged.request.kind === inspected.kind && staged.request.targetUrl === inspected.targetUrl ? staged : void 0;
-    if (token !== void 0 && !entry) fail2("ACTION_CANCELLED", "The committed action evidence was cancelled or is unavailable; inspect without a token only for an unattributed current-state observation.");
+    if (token !== void 0 && !entry) fail3("ACTION_CANCELLED", "The committed action evidence was cancelled or is unavailable; inspect without a token only for an unattributed current-state observation.");
     const request = entry?.request ?? inspected;
     const ctx = { url: canonical(location.href), account: account2() };
-    if (entry && ctx.account !== entry.account) fail2("ACCOUNT_MISMATCH", "The account changed after dispatch.");
+    if (entry && ctx.account !== entry.account) fail3("ACCOUNT_MISMATCH", "The account changed after dispatch.");
     if (ctx.url !== request.targetUrl) {
       const ownNewPostRoute = !!entry?.committedAt && ["publish", "reply", "quote"].includes(request.kind) && !entry.beforeUrls.has(ctx.url) && new URL(ctx.url).pathname.startsWith(`/@${ctx.account}/post/`) && /^\/@[\w.]+\/post\/[\w-]+$/.test(new URL(ctx.url).pathname);
-      if (!ownNewPostRoute) fail2("TARGET_CHANGED", "The current page is neither the prepared target nor a new own-post route after commit.");
+      if (!ownNewPostRoute) fail3("TARGET_CHANGED", "The current page is neither the prepared target nor a new own-post route after commit.");
     }
     if (["publish", "reply", "quote"].includes(request.kind)) {
       const result = observation(request, void 0, ctx);
@@ -954,8 +1217,11 @@ var ThreadsMCP = (() => {
   }
 
   // src/page-runtime.ts
-  var runtimeVersion = "0.4.2";
-  var runtimeRevision = "20261024-readiness-3";
+  function directProfile2(args) {
+    return directProfile(args, { viewer: () => viewer().username, guard: guard2 });
+  }
+  var runtimeVersion = "0.5.0";
+  var runtimeRevision = "20261106-direct-profile-1";
   var current;
   function routeKey(value) {
     try {
@@ -1495,16 +1761,16 @@ var ThreadsMCP = (() => {
       options[0].click();
       dialog = await waitActivity("overview", () => {
         if (currentPostTarget()?.url !== target.url) throw new Error("CONTEXT_CHANGED: The post changed while activity opened.");
-        const active = visibleDialog();
-        const state2 = postActivity(active);
-        if (!active || !state2 || state2.busy) return void 0;
+        const active2 = visibleDialog();
+        const state2 = postActivity(active2);
+        if (!active2 || !state2 || state2.busy) return void 0;
         if (state2.targetUrl === target.url) {
-          bindActivitySession(target, active);
-          return active;
+          bindActivitySession(target, active2);
+          return active2;
         }
-        if (state2.selectedTab === null && !active.querySelector('a[href*="/post/"]')) {
-          bindActivitySession(target, active);
-          return active;
+        if (state2.selectedTab === null && !active2.querySelector('a[href*="/post/"]')) {
+          bindActivitySession(target, active2);
+          return active2;
         }
         throw new Error("TARGET_UNVERIFIED: The opened activity view does not identify the requested post.");
       });
@@ -1521,9 +1787,9 @@ var ThreadsMCP = (() => {
       activityDiagnostic.dispatches++;
       choices[0].click();
       await waitActivity(activityTab, () => {
-        const active = postActivity(visibleDialog());
+        const active2 = postActivity(visibleDialog());
         if (currentPostTarget()?.url !== target.url) throw new Error("CONTEXT_CHANGED: The post changed while activity loaded.");
-        return active?.targetUrl === target.url && active.selectedTab === activityTab && !active.busy ? active : void 0;
+        return active2?.targetUrl === target.url && active2.selectedTab === activityTab && !active2.busy ? active2 : void 0;
       });
     }
     activityDiagnostic.stage = "complete";

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
 import { ThreadsError } from './types.js';
+import { validateDirectProfileCommand } from './direct-profile-command.js';
 
 interface BridgeOptions { dataDir: string; port?: number; commandTimeoutMs?: number; authTimeoutMs?: number }
 interface BoundTab { id: number; url: string; title?: string }
@@ -26,6 +27,7 @@ function validateCommand(command: Record<string, unknown>): void {
       if (!isThreadsUrl(command.url)) throw new ThreadsError('INVALID_URL', 'Navigation must remain on an HTTPS Threads page.');
       break;
     case 'read': case 'snapshot': case 'screenshot': break;
+    case 'direct_profile': validateDirectProfileCommand(command); break;
     case 'social':
       if(!['stage','commit','inspect'].includes(String(command.operation)))throw new ThreadsError('INVALID_COMMAND','Unknown social operation.');
       break;
@@ -241,7 +243,7 @@ export class BridgeServer {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new ThreadsError('BRIDGE_TIMEOUT', 'Browser command timed out. Its outcome may be unknown; it was not replayed.'));
-      }, this.options.commandTimeoutMs ?? 30000);
+      }, this.options.commandTimeoutMs ?? (command.type === 'direct_profile' ? 50000 : 30000));
       this.pending.set(id, { resolve: value => resolve(value as T), reject, timer });
       this.socket!.send(JSON.stringify({ id, command }), error => {
         if (error) {

@@ -8,6 +8,7 @@ import type {ThreadsService} from './service.js';
 import type {BrowserDriver} from './driver.js';
 import {ThreadsError} from './types.js';
 import {remoteHealth} from './remote-health.js';
+import {validateDirectProfileCommand} from './direct-profile-command.js';
 
 const MAX_BODY=64*1024;
 const validToken=(value:string)=>/^[A-Za-z0-9_-]{43,128}$/.test(value);
@@ -39,7 +40,8 @@ export class RemoteReadDriver implements BrowserDriver{
   status(){return this.driver.status();}
   async refreshStatus(){return this.driver.refreshStatus?this.driver.refreshStatus():this.driver.status();}
   async command<T>(command:Record<string,unknown>):Promise<T>{
-    if(!['read','navigate','scroll','open_read_panel'].includes(String(command.type)))throw new ThreadsError('REMOTE_READ_ONLY','Unsupported remote browser operation.');
+    if(!['read','navigate','scroll','open_read_panel','direct_profile'].includes(String(command.type)))throw new ThreadsError('REMOTE_READ_ONLY','Unsupported remote browser operation.');
+    if(command.type==='direct_profile')validateDirectProfileCommand(command);
     if(command.type==='navigate'&&!safeReadUrl(command.url))throw new ThreadsError('REMOTE_ROUTE_DENIED','Unsupported remote read route.');
     const result=await this.driver.command<any>(command);
     if(command.type==='read'){

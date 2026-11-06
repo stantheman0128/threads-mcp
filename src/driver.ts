@@ -5,6 +5,7 @@ import type { BridgeServer } from './bridge.js';
 import type { Config } from './config.js';
 import { ThreadsError } from './types.js';
 import { threadsUrl } from './urls.js';
+import { validateDirectProfileCommand } from './direct-profile-command.js';
 
 export interface BrowserDriver {
   command<T>(command: Record<string, unknown>): Promise<T>;
@@ -22,6 +23,7 @@ function validate(input: Record<string, unknown>): Record<string, unknown> {
       command.url = threadsUrl(command.url);
       break;
     case 'read': case 'snapshot': case 'screenshot': break;
+    case 'direct_profile': validateDirectProfileCommand(command); break;
     case 'social':
       if(!['stage','commit','inspect'].includes(String(command.operation)))throw new ThreadsError('INVALID_COMMAND','Unknown social operation.');
       break;
@@ -145,6 +147,7 @@ export class DedicatedDriver extends SerializedDriver {
       const api = (globalThis as unknown as { ThreadsMCP?: {
         readPage(): unknown; snapshot(): unknown; interact(args: unknown): unknown;
         scroll(pixels: number): unknown; openReadPanel(panel: string,activityTab?:string): unknown;
+        directProfile(args: { username: string; maxPages: number; pageSize: number }): unknown;
         socialStage(request:unknown):unknown; socialCommit(token:string,expectedAccount:string):unknown; socialInspect(request:unknown,token?:string):unknown;media(command:unknown):unknown;
       } }).ThreadsMCP;
       if (!api) return { error: { code: 'RUNTIME_UNAVAILABLE', message: 'Browser runtime is unavailable in this document.' } };
@@ -152,6 +155,7 @@ export class DedicatedDriver extends SerializedDriver {
         let result: unknown;
         switch (command.type) {
           case 'read': result = await api.readPage(); break;
+          case 'direct_profile': result = await api.directProfile({ username: command.username as string, maxPages: command.maxPages as number, pageSize: command.pageSize as number }); break;
           case 'snapshot': result = await api.snapshot(); break;
           case 'interact': result = await api.interact(command); break;
           case 'scroll': result = await api.scroll(command.pixels as number); break;

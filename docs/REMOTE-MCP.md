@@ -10,6 +10,30 @@ There are still exactly 15 remote tools: `threads_status`, `threads_search`, `th
 
 No messages, notifications, arbitrary browser controls, social writes, media uploads, official API, drafts, schedules or filesystem export tools are registered. Writes stay disabled even if `THREADS_ALLOW_WRITES=true` is inherited. Observations use the separate `remote-index` directory. Allowed reads include liked/saved posts and personal activity; give access only to a trusted client. Results are bounded observations, not complete history.
 
+### Direct public-profile pagination (v0.5.0)
+
+**v0.5.0 is activated and the deployed tool passed multi-page acceptance on 2026-11-06.** Loopback HTTP, public HTTPS and the actual `mcp-remote@0.16.1` header-file wrapper each returned four public-profile pages (19 unique posts), then three viewer-profile pages (14 unique posts). Later pages each added five target-authored posts with advancing cursors. The remote allowlist remains 15 tools and writes stay disabled. Wrapper testing ran on the maintainer's host; refresh/restart the owner's Grok MCP to load the new schema and verify its next read there.
+
+```json
+{"tool":"threads_get_profile","arguments":{"username":"target_handle","section":"posts","provider":"direct","maxPages":4,"pageSize":5}}
+```
+
+| Parameter | Contract |
+| --- | --- |
+| `provider` | `browser` by default; `direct` opts into selected-Chrome-session requests. |
+| `section` | Direct mode supports `posts` on public profiles only. Other sections retain the browser provider. |
+| `maxPages` | Integer 1–5, default 3; includes the initial bootstrap page. |
+| `pageSize` | Integer 1–20, default 10; requested continuation-page size, not a guarantee about the bootstrap window or total results. |
+| `rounds` | Used by the browser provider; ignored by direct mode. |
+
+One direct call navigates to the target profile and collects a bounded sequence without scrolling. It never silently falls back to scrolling. A new call starts from the profile again; there is no cross-call resume. Authentication remains in the selected Chrome tab, with request credentials kept inside the page; no Cookie transfer or official API token is required. This is a scoped profile-read operation, not an arbitrary fetch or GraphQL tool.
+
+The response retains `completeness:"partial"` and adds `pagination` containing `provider`, `pagesFetched`, `requests`, `uniquePosts`, `hasNext`, `stopReason`, and `pages`. Each page records `page`, `received`, `added`, and `cursorAdvanced`. `requests` counts direct continuation attempts; `pagesFetched` counts collected pages including bootstrap. Later-page positive `added` values, together with cursor progress, are the evidence of productive pagination.
+
+Inspect `stopReason` and warnings: `page_limit` is budget exhaustion, `end_of_connection` is an observed endpoint, and `no_progress`, cursor, schema or request failures are stopping conditions. None establishes complete history. Keep `hasNext:null` as unknown. Do not replay repeated calls as if they continued a prior cursor.
+
+Production acceptance exercised this exact tool through the deployed connection, observed later-page additions, and confirmed the subsequent read with writes disabled. Both results stopped at `page_limit` with `hasNext:true`; neither was complete history. The [Grok prompt](GROK-BOT.md#v050-direct-multi-page-public-profile-reads) provides the call and reporting instructions. The [dated record](DIRECT-READ-RESEARCH.md) separates the earlier prototype from production acceptance.
+
 Recovery restarts services and prepares the next read. It **does not replay a failed browser command**, reconnect a manually disconnected tab, log in to Threads, or solve a challenge. Chrome's session-only pairing and a new bridge token require user pairing after either restarts. HTTP remains available while bridge is absent and adopts fresh local pairing information before a subsequent command; no HTTP restart is needed just because bridge restarted.
 
 ## 1. Configure the permanent route once

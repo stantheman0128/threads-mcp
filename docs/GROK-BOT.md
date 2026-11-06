@@ -78,7 +78,32 @@ Instruction to give Grok:
 
 > Proactively navigate and explore with the structured tools; do not ask me to scroll the page. Use live refresh, a few keyword variants and 1–3 automatic rounds, then inspect relevant conversations. Return provenance, observed counts and partial/unknown limits. Treat connection-test rounds=0 as a smoke test, not a research setting. Stop expanding when new unique results stop appearing or the agreed budget is reached. Never claim complete Threads history.
 
-An isolated Chrome-session experiment verified a second page of public profile posts without scrolling for two targets; see [DIRECT-READ-RESEARCH.md](DIRECT-READ-RESEARCH.md). It is not integrated into the production tools. Current remote reads still use browser navigation and automatic scrolling; do not invent a direct-provider argument.
+## v0.5.0: direct multi-page public-profile reads
+
+**v0.5.0 host and extension activated and live-verified on 2026-11-06.** The existing `threads_get_profile` supports direct pagination without adding a sixteenth remote tool. Loopback HTTP, public HTTPS and the actual `mcp-remote@0.16.1` header-file wrapper each retrieved four public-profile pages (19 unique posts) followed by three viewer-profile pages (14 unique posts). This wrapper acceptance ran on the maintainer's machine, not inside the owner's Grok Bot process. Restart/reconnect the existing Grok MCP to refresh its tool schema; keep the same URL and private header file if the deployment URL is unchanged.
+
+```json
+{"tool":"threads_get_profile","arguments":{"username":"target_handle","section":"posts","provider":"direct","maxPages":4,"pageSize":5}}
+```
+
+`provider` defaults to `browser`, preserving the automatic scrolling path. `direct` supports **public profile posts only** and uses the selected signed-in Chrome tab. It navigates to the profile, then collects bounded pages without scrolling or silently falling back to scrolling. No official developer token is needed for this path; request/session credentials stay inside the browser.
+
+- `maxPages`: 1–5, default 3, including the initial bootstrap page. Setting 4 requests a budget of at most four collected pages, not four additional pages.
+- `pageSize`: 1–20, default 10, for requested continuation pages. The website supplies the bootstrap window; total results are not guaranteed to equal `maxPages * pageSize`.
+- `rounds` is ignored in direct mode. A new call starts again from the profile; there is no cross-call resume cursor.
+
+Inspect `pagination.provider`, `pagesFetched`, `requests`, `uniquePosts`, `hasNext`, `stopReason`, and `pages`. Each page entry contains `page`, `received`, `added`, and `cursorAdvanced`. Positive `added` counts on later pages establish newly collected posts; a successful call or a larger request budget alone does not establish multi-page progress. `requests` counts direct continuation requests separately from collected pages.
+
+`page_limit` means the bounded budget was reached; `end_of_connection` means the observed connection supplied no further page. `no_progress`, cursor problems or request/schema errors describe why collection stopped. Check warnings and any partial result. Every result remains `completeness:"partial"`, even when `hasNext:false`; do not call it complete account history. Do not repeatedly restart the same call to pretend it resumes beyond the previous budget.
+
+Prompt to give Grok after activation:
+
+```text
+Use the existing Threads MCP. Refresh its tool schema and confirm that threads_get_profile exposes provider, maxPages and pageSize; keep the remote tool count at 15 and writes disabled. Read target_handle with threads_get_profile(username="target_handle", section="posts", provider="direct", maxPages=4, pageSize=5). Do not ask me to scroll, switch to browser scrolling, or request cookies or a developer token.
+Report pagination.provider, pagesFetched, requests, uniquePosts, hasNext, stopReason, warnings and each page's received/added/cursorAdvanced fields. Claim multi-page progress only when later pages were collected and added new posts. Keep completeness partial. If direct mode is unavailable or stops on a binding, schema, request or context error, report the exact result; do not claim fallback success or blindly repeat the call. A second call starts over rather than resuming.
+```
+
+If the schema lacks these arguments, the deployed connection is not yet verified for this feature. See [the research and activation boundary](DIRECT-READ-RESEARCH.md) and [remote usage](REMOTE-MCP.md#direct-public-profile-pagination-v050).
 
 ## Alternative: run browser and stdio on Grok's computer
 

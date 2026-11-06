@@ -230,7 +230,7 @@ test('observations runtime: notification isolation and profile result provenance
       });
       await page.evaluate(()=>(window as any).ThreadsMCP.openReadPanel('likers'));
       assert.equal(await page.evaluate(()=>(window as any).clicks),1);assert.ok(await page.evaluate(()=>(window as any).clickedAfter)>=3350);
-      const result=await page.evaluate(()=>(window as any).ThreadsMCP.readPage());assert.equal(result.runtimeRevision,'20261024-readiness-3');assert.equal(result.runtimeDiagnostics.activity.dispatches,1);assert.equal(result.runtimeDiagnostics.activity.stage,'complete');
+      const result=await page.evaluate(()=>(window as any).ThreadsMCP.readPage());assert.equal(result.runtimeRevision,'20261106-direct-profile-1');assert.equal(result.runtimeDiagnostics.activity.dispatches,1);assert.equal(result.runtimeDiagnostics.activity.stage,'complete');
     });
     await t.test('busy diagnostics expose marker structure without actor identities or relaxing current busy semantics',async()=>{
       const result=await read('<div role="dialog"><button role="tab" aria-selected="true">Followers</button><section><div><a href="/@alice">alice</a></div><div role="status" aria-label="載入中……"><svg role="img" aria-label="載入中……" width="20" height="20"></svg></div></section></div>','/@owner');

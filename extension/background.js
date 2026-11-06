@@ -41,6 +41,7 @@ function disconnect(reason = '') {
     void chrome.scripting.executeScript({ target: { tabId: previousTabId }, world: 'ISOLATED', injectImmediately: true, func: () => {
       globalThis.ThreadsMCP?.cancelMediaTransfers?.();
       globalThis.ThreadsMCP?.cancelSocialActions?.();
+      globalThis.ThreadsMCP?.cancelDirectProfiles?.();
     } }).catch(() => undefined);
   }
 }
@@ -85,6 +86,7 @@ async function runtime(tabId, command, generation) {
         let result;
         switch (command.type) {
           case 'read': result = { ...await api.readPage(), extensionVersion }; break;
+          case 'direct_profile': result = await api.directProfile({ username: command.username, maxPages: command.maxPages, pageSize: command.pageSize }); break;
           case 'snapshot': result = await api.snapshot(); break;
           case 'interact': result = await api.interact({ snapshotId: command.snapshotId, ref: command.ref, verb: command.verb, value: command.value }); break;
           case 'scroll': result = await api.scroll(command.pixels); break;
@@ -99,6 +101,7 @@ async function runtime(tabId, command, generation) {
         return { error: { code: String(error?.code ?? /^[A-Z_]+:/.exec(message)?.[0].slice(0,-1) ?? 'PAGE_COMMAND_FAILED').slice(0, 100), message: message.slice(0, 1000) } };
       }
     } });
+  if (command.type === 'direct_profile') assertConnection(tabId, generation);
   const response = results[0]?.result;
   if (!response) throw failure('PAGE_COMMAND_FAILED', '頁面沒有回應；指令不會重送。');
   if (response.error) throw failure(response.error.code, response.error.message);
@@ -198,8 +201,16 @@ async function navigate(tabId, url, generation) {
 async function execute(command, generation) {
   if (generation !== epoch || !connected) throw failure('BRIDGE_DISCONNECTED', '連線已中斷；指令未執行。');
   if (!command || typeof command !== 'object') throw failure('INVALID_COMMAND', '指令格式錯誤。');
-  const allowed = ['navigate', 'read', 'snapshot', 'interact', 'scroll', 'open_read_panel', 'screenshot','social','media'];
+  const allowed = ['navigate', 'read', 'snapshot', 'interact', 'scroll', 'open_read_panel', 'screenshot','social','media','direct_profile'];
   if (!allowed.includes(command.type)) throw failure('INVALID_COMMAND', '不支援這個指令。');
+  // Standalone extension boundary mirrors validateDirectProfileCommand. Never
+  // accept arbitrary URLs, query documents, headers, cursors or fetch options.
+  if (command.type === 'direct_profile' && (Array.isArray(command) || Object.keys(command).length !== 4 ||
+      Object.keys(command).some(key => !['type','username','maxPages','pageSize'].includes(key)) ||
+      typeof command.username !== 'string' || !/^[A-Za-z0-9_.]{1,30}$/.test(command.username) ||
+      !Number.isInteger(command.maxPages) || command.maxPages < 1 || command.maxPages > 5 ||
+      !Number.isInteger(command.pageSize) || command.pageSize < 1 || command.pageSize > 20))
+    throw failure('INVALID_COMMAND', 'Invalid direct profile command.');
   const tab = await boundTab(['interact', 'screenshot'].includes(command.type));
   if (generation !== epoch) throw failure('BRIDGE_DISCONNECTED', '連線已中斷。');
   if (command.type === 'navigate') return navigate(tab.id, command.url, generation);

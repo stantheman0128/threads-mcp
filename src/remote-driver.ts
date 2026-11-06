@@ -86,7 +86,7 @@ export class RemoteExtensionDriver implements BrowserDriver {
       await this.refreshConnection();
       if (!this.hostStatus?.connected) throw new ThreadsError('BRIDGE_NOT_CONNECTED', 'The local bridge has no connected extension tab.');
       try {
-        const reply = await this.request('/command', 'POST', body);
+        const reply = await this.request('/command', 'POST', body, command.type === 'direct_profile' ? 55000 : undefined);
         return reply.result as T;
       } catch (error) { this.recordFailure(error); throw error; }
     });
@@ -116,10 +116,10 @@ export class RemoteExtensionDriver implements BrowserDriver {
     return true;
   }
 
-  private async request(path: '/status' | '/command', method: 'GET' | 'POST', body?: string): Promise<Record<string, any>> {
+  private async request(path: '/status' | '/command', method: 'GET' | 'POST', body?: string, commandTimeoutMs?: number): Promise<Record<string, any>> {
     const controller = new AbortController();
     this.controllers.add(controller);
-    const timer = setTimeout(() => controller.abort(), path === '/status' ? this.options.healthTimeoutMs ?? 3000 : this.options.requestTimeoutMs ?? 35000);
+    const timer = setTimeout(() => controller.abort(), path === '/status' ? this.options.healthTimeoutMs ?? 3000 : this.options.requestTimeoutMs ?? commandTimeoutMs ?? 35000);
     try {
       const response = await fetch(`http://127.0.0.1:${this.port}${path}`, {
         method, redirect: 'error', signal: controller.signal,

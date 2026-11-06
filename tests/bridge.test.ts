@@ -58,6 +58,23 @@ test('missing authentication and wrong tokens are rejected', async () => {
   } finally { await cleanup(); }
 });
 
+test('standalone bridge validates and forwards bounded direct profile reads exactly once', async () => {
+  const { bridge, pairing, cleanup } = await setup();
+  try {
+    const ws = await authenticated(pairing.port, pairing.token);
+    const received: unknown[] = [];
+    ws.on('message', data => {
+      const message = JSON.parse(String(data));
+      if (message.command) { received.push(message.command); ws.send(JSON.stringify({ id: message.id, result: { posts: [], partial: true } })); }
+    });
+    const command = { type: 'direct_profile', username: 'fixture', maxPages: 5, pageSize: 20 };
+    assert.deepEqual(await bridge.command(command), { posts: [], partial: true });
+    for (const invalid of [{ ...command, url: 'https://example.test' }, { ...command, username: '../x' }, { ...command, maxPages: 6 }])
+      await assert.rejects(bridge.command(invalid), { code: 'INVALID_COMMAND' });
+    assert.deepEqual(received, [command]);
+  } finally { await cleanup(); }
+});
+
 test('ordinary web origins cannot upgrade even with the right token', async () => {
   const { pairing, cleanup } = await setup();
   try {

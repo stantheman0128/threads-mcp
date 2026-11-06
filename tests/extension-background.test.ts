@@ -24,6 +24,8 @@ function harness(injectedVersion = '0.1.1') {
   const navigationDeadlines: Array<() => void> = [];
   let commitDocumentOnUpdate = true;
   let documentNumber = 0;
+  let holdDirectProfile = false;
+  let rejectDirectProfile: ((error: Error) => void) | undefined;
   const chrome = {
     runtime: { id: 'fixture', getManifest: () => ({ version: '0.1.1' }), onMessage: event() }, storage: { session: { set: async () => undefined } },
     tabs: { onUpdated, onRemoved: event(), get: async (id: number) => { calls.push({ kind: 'get', args: id }); return { ...tab }; },
@@ -43,6 +45,12 @@ function harness(injectedVersion = '0.1.1') {
         openReadPanel: (panel: string,activityTab?:string) => { calls.push({ kind: 'panel', args: {panel,activityTab} }); return { panel,activityTab }; },
         interact: () => { calls.push({ kind: 'interact' }); return { done: true }; },
         socialCommit: () => { calls.push({ kind: 'social-commit' }); return { dispatched: true }; },
+        directProfile: (args: unknown) => {
+          calls.push({ kind: 'direct-profile', args });
+          if (holdDirectProfile) return new Promise((_resolve, reject) => { rejectDirectProfile = reject; });
+          return { posts: [], partial: true };
+        },
+        cancelDirectProfiles: () => { calls.push({ kind: 'cancel-direct' }); rejectDirectProfile?.(new Error('DIRECT_PROFILE_CANCELLED: Cancelled.')); },
         cancelMediaTransfers: () => { calls.push({ kind: 'cancel-media' }); },
         cancelSocialActions: () => { calls.push({ kind: 'cancel-social' }); } };
       const result = await runInNewContext(`(${options.func.toString()})(...args)`, { args: options.args ?? [], ThreadsMCP: runtime,
@@ -59,6 +67,7 @@ function harness(injectedVersion = '0.1.1') {
   runInContext('boundTabId = 42; connected = true; globalThis.testing = { execute: command => execute(command, epoch), disconnect, navigationCount: () => pendingNavigations.size };', context);
   const api = (context as any).testing as { execute(command: object): Promise<any>; disconnect(): void; navigationCount(): number };
   return { api, tab, page, calls, onUpdated, focus: (value: boolean) => { focused = value; },
+    holdDirectProfile: () => { holdDirectProfile = true; },
     runtimeVersion: (value: string) => { runtimeVersion = value; },
     holdRuntimeProbe: (gate: Promise<void>) => { runtimeProbeGate = gate; },
     holdNavigationProbe: (gate: Promise<void>) => { navigationProbeGate = gate; },
@@ -71,6 +80,35 @@ function harness(injectedVersion = '0.1.1') {
     cleanup: () => api.disconnect() };
 }
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+test('direct profile dispatch is typed, document pinned and allowed in the hidden selected tab', async () => {
+  const h = harness();
+  const command = { type: 'direct_profile', username: 'fixture.name', maxPages: 2, pageSize: 10 };
+  try {
+    assert.equal((await h.api.execute(command)).partial, true);
+    assert.deepEqual(JSON.parse(JSON.stringify(h.calls.find(call => call.kind === 'direct-profile')?.args)),
+      { username: 'fixture.name', maxPages: 2, pageSize: 10 });
+    const scripts = h.calls.filter(call => call.kind === 'script');
+    assert.deepEqual([...scripts.at(-1)!.args.documentIds], ['document-0']);
+    for (const invalid of [{ ...command, url: 'https://www.threads.com/' }, { ...command, cursor: 'opaque' },
+      { ...command, username: '@fixture' }, { ...command, maxPages: 6 }, { ...command, pageSize: 21 }, { ...command, pageSize: '10' }])
+      await assert.rejects(h.api.execute(invalid), { code: 'INVALID_COMMAND' });
+    assert.equal(h.calls.filter(call => call.kind === 'direct-profile').length, 1);
+    assert.ok(!h.calls.some(call => call.kind === 'focus' || call.kind === 'update'));
+  } finally { h.cleanup(); }
+});
+
+test('disconnect cancels an in-flight direct profile and keeps media and social cancellation', async () => {
+  const h = harness();
+  h.holdDirectProfile();
+  const pending = h.api.execute({ type: 'direct_profile', username: 'fixture', maxPages: 1, pageSize: 1 });
+  const rejected = assert.rejects(pending, { code: 'BRIDGE_DISCONNECTED' });
+  await delay(0);
+  assert.equal(h.calls.filter(call => call.kind === 'direct-profile').length, 1);
+  h.api.disconnect();
+  await rejected;
+  for (const kind of ['cancel-direct', 'cancel-media', 'cancel-social']) assert.equal(h.calls.filter(call => call.kind === kind).length, 1);
+});
 
 function connectionHarness() {
   const storage: Array<() => void> = [];
