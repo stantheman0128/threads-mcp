@@ -1467,10 +1467,30 @@ var ThreadsMCP = (() => {
     if (typeof value !== "string" || !/^@?[A-Za-z0-9_.]{1,64}$/.test(value)) fail4("INVALID_INPUT");
     return value.replace(/^@/, "").toLowerCase();
   }
+  function profileNavigationLabel(node) {
+    const clean = (value) => (value || "").trim().replace(/\s+/g, " ");
+    const explicit = clean(node.getAttribute("aria-label"));
+    if (explicit) return explicit;
+    const labelledBy = clean((node.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean).map((id2) => document.getElementById(id2)?.textContent || "").join(" "));
+    if (labelledBy) return labelledBy;
+    const names = [];
+    for (const icon of node.querySelectorAll("svg")) {
+      if (icon.closest('button,[role="button"],[role="menuitem"],a') !== node || icon.closest('[aria-hidden="true"],[inert]') || !icon.getClientRects().length || getComputedStyle(icon).display === "none" || getComputedStyle(icon).visibility === "hidden") continue;
+      const aria = clean(icon.getAttribute("aria-label"));
+      if (aria) {
+        names.push(aria);
+        continue;
+      }
+      const titles = [clean(icon.getAttribute("title")), ...[...icon.children].filter((child) => child.localName === "title").map((child) => clean(child.textContent))].filter(Boolean);
+      if (new Set(titles).size > 1) return "";
+      if (titles[0]) names.push(titles[0]);
+    }
+    if (names.length > 1) return "";
+    return names[0] || clean([...node.childNodes].filter((child) => child.nodeType === Node.TEXT_NODE).map((child) => child.textContent).join(" "));
+  }
   function currentAccount() {
     const names = [...document.querySelectorAll("a[href]")].filter(visible2).flatMap((node) => {
-      const label2 = node.getAttribute("aria-label") || node.querySelector("svg")?.getAttribute("aria-label") || "";
-      if (!/^(Profile|個人檔案)$/i.test(label2.trim())) return [];
+      if (node.closest('article,[role="dialog"],[role="menu"]') || !/^(Profile|個人檔案)$/i.test(profileNavigationLabel(node))) return [];
       try {
         const url = new URL(checkedRemoteBrowserUrl(new URL(node.getAttribute("href"), location.origin).href));
         const match = /^\/@([A-Za-z0-9_.]{1,64})$/.exec(url.pathname);
@@ -1634,7 +1654,7 @@ var ThreadsMCP = (() => {
     return directProfile(args, { viewer: () => viewer().username, guard: guard2 });
   }
   var runtimeVersion = "0.7.0";
-  var runtimeRevision = "20261106-remote-parity-1";
+  var runtimeRevision = "20261107-profile-label-1";
   var remoteViewEpoch = 0;
   var remoteViewWatching = false;
   var remoteViewBinding;

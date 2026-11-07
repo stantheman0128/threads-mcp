@@ -67,10 +67,31 @@ function expectedAccount(value: unknown): string {
   if (typeof value !== 'string' || !/^@?[A-Za-z0-9_.]{1,64}$/.test(value)) fail('INVALID_INPUT');
   return value.replace(/^@/, '').toLowerCase();
 }
+function profileNavigationLabel(node: HTMLAnchorElement): string {
+  const clean = (value: string | null | undefined) => (value || '').trim().replace(/\s+/g, ' ');
+  const explicit = clean(node.getAttribute('aria-label'));
+  if (explicit) return explicit;
+  const labelledBy = clean((node.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean)
+    .map(id => document.getElementById(id)?.textContent || '').join(' '));
+  if (labelledBy) return labelledBy;
+  const names: string[] = [];
+  for (const icon of node.querySelectorAll('svg')) {
+    if (icon.closest('button,[role="button"],[role="menuitem"],a') !== node || icon.closest('[aria-hidden="true"],[inert]') ||
+        !icon.getClientRects().length || getComputedStyle(icon).display === 'none' || getComputedStyle(icon).visibility === 'hidden') continue;
+    const aria = clean(icon.getAttribute('aria-label'));
+    if (aria) { names.push(aria); continue; }
+    const titles = [clean(icon.getAttribute('title')), ...[...icon.children].filter(child => child.localName === 'title').map(child => clean(child.textContent))].filter(Boolean);
+    if (new Set(titles).size > 1) return '';
+    if (titles[0]) names.push(titles[0]);
+  }
+  if (names.length > 1) return '';
+  // Descendant text can belong to hidden or nested controls, so only the
+  // anchor's own text nodes may supply the unlabelled fallback.
+  return names[0] || clean([...node.childNodes].filter(child => child.nodeType === Node.TEXT_NODE).map(child => child.textContent).join(' '));
+}
 function currentAccount(): string {
   const names = [...document.querySelectorAll<HTMLAnchorElement>('a[href]')].filter(visible).flatMap(node => {
-    const label = node.getAttribute('aria-label') || node.querySelector('svg')?.getAttribute('aria-label') || '';
-    if (!/^(Profile|個人檔案)$/i.test(label.trim())) return [];
+    if (node.closest('article,[role="dialog"],[role="menu"]') || !/^(Profile|個人檔案)$/i.test(profileNavigationLabel(node))) return [];
     try { const url = new URL(checkedRemoteBrowserUrl(new URL(node.getAttribute('href')!, location.origin).href));
       const match = /^\/@([A-Za-z0-9_.]{1,64})$/.exec(url.pathname); return match ? [match[1]!.toLowerCase()] : []; } catch { return []; }
   });

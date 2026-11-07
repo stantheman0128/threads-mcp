@@ -10,7 +10,7 @@ export {socialStage,socialCommit,socialInspect,socialPrepareConfirmation,socialC
 export {remoteBrowser,validateRemoteBrowserCommand,cancelRemoteBrowserActions} from './remote-browser-runtime.js';
 export {media,cancelMediaTransfers} from './media-runtime.js';
 export const runtimeVersion='0.7.0';
-export const runtimeRevision='20261106-remote-parity-1';
+export const runtimeRevision='20261107-profile-label-1';
 let remoteViewEpoch=0,remoteViewWatching=false;
 let remoteViewBinding:{token:string;route:string;account:string|null;epoch:number;expires:number}|undefined;
 export function cancelRemoteViews(){remoteViewEpoch++;remoteViewBinding=undefined;}

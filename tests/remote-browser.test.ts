@@ -142,6 +142,34 @@ test('remote browser runtime vets actual DOM refs without generic effects or pri
       assert.doesNotMatch(JSON.stringify(snapshot), /PRIVATE UNRELATED DOM SECRET/);
       assert.ok(snapshot.elements.every((ref: any) => ref.kind === 'navigation' || ref.kind === 'search'));
     });
+    await t.test('profile navigation accepts visible owned SVG titles and accessible labels', async () => {
+      for (const markup of ['<svg title="個人檔案"></svg>', '<svg><title>個人檔案</title></svg>', '<svg aria-label="Profile"></svg>', 'Profile']) {
+        await reset();
+        await page.evaluate(markup => { const link = document.querySelector('[aria-label=Profile]')!; link.removeAttribute('aria-label'); link.innerHTML = markup; }, markup);
+        assert.equal((await snap()).account, 'fixture');
+      }
+      await reset();
+      await page.evaluate(() => { const link = document.querySelector('[aria-label=Profile]')!; link.removeAttribute('aria-label'); link.setAttribute('aria-labelledby', 'profile-label'); link.innerHTML = '<span id="profile-label">個人檔案</span>'; });
+      assert.equal((await snap()).account, 'fixture');
+    });
+    await t.test('profile identity rejects conflicting, hidden, nested and unrelated account evidence', async () => {
+      for (const markup of ['<svg title="Profile"><title>Other</title></svg>', '<svg title="Profile"></svg><svg title="Profile"></svg>',
+        '<svg aria-hidden="true" title="Profile"></svg>', '<svg style="display:none" title="Profile"></svg>', '<button><svg title="Profile"></svg></button>',
+        '<button>Profile</button>', '<span aria-hidden="true">Profile</span>', '<span inert>Profile</span>']) {
+        await reset();
+        await page.evaluate(markup => { const link = document.querySelector('[aria-label=Profile]')!; link.removeAttribute('aria-label'); link.innerHTML = markup; }, markup);
+        await assert.rejects(snap(), /ACCOUNT_UNVERIFIED/);
+      }
+      await reset();
+      await page.evaluate(() => { const link = document.querySelector('[aria-label=Profile]')!; link.setAttribute('href', 'https://foreign.invalid/@fixture'); });
+      await assert.rejects(snap(), /ACCOUNT_UNVERIFIED/);
+      await reset();
+      await page.evaluate(() => { const other = document.createElement('a'); other.href = '/@other'; other.setAttribute('aria-label', 'Profile'); other.textContent = 'Profile'; document.body.append(other); });
+      await assert.rejects(snap(), /ACCOUNT_UNVERIFIED/);
+      await reset();
+      await page.evaluate(() => { const link = document.querySelector('[aria-label=Profile]')!; const article = document.createElement('article'); link.replaceWith(article); article.append(link); });
+      await assert.rejects(snap(), /ACCOUNT_UNVERIFIED/);
+    });
     await t.test('search atomically navigates its approved URL once without filling, clicking or submitting', async () => {
       await reset(); const snapshot = await snap();
       const prepared = await prep(snapshot, snapshot.elements.find((ref: any) => ref.kind === 'search'), { value: 'public agents' });

@@ -3,7 +3,8 @@ import {readFileSync,writeFileSync,mkdirSync,unlinkSync} from 'node:fs';
 import {join,resolve} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
-import {Client,StreamableHTTPClientTransport,StdioClientTransport} from '@modelcontextprotocol/client';
+import {Client,StreamableHTTPClientTransport} from '@modelcontextprotocol/client';
+import {StdioClientTransport} from '@modelcontextprotocol/client/stdio';
 import {RemoteExtensionDriver} from '../src/remote-driver.js';
 
 // Read-only activation: no notification/message views, uploads or social execution.
@@ -21,7 +22,7 @@ async function call(name:string,args:Record<string,unknown>){
 try{
   await driver.connect();const initial=await driver.command<any>({type:'read'});
   report.runtime={extension:initial.extensionVersion,runtime:initial.runtimeVersion,revision:initial.runtimeRevision,visibility:initial.visibilityState};
-  assert.equal(initial.extensionVersion,expectedVersion);assert.equal(initial.runtimeVersion,expectedVersion);assert.equal(initial.runtimeRevision,'20261106-remote-parity-1');
+  assert.equal(initial.extensionVersion,expectedVersion);assert.equal(initial.runtimeVersion,expectedVersion);assert.equal(initial.runtimeRevision,'20261107-profile-label-1');
   assert.ok(initial.viewer?.username);assert.equal(initial.composerState?.present,false);assert.equal(initial.composerState?.nonempty,false);
   originalRoute=initial.url;account=initial.viewer.username;
   const token=readFileSync(join(data,'remote-access.token'),'utf8').trim();
